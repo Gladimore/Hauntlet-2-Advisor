@@ -87,19 +87,22 @@ function combos(n,r){const k=n+(r<=9?'N':'O');if(CB[k])return CB[k];
  rec(0,[]);return CB[k]=res}
 // one-room lookahead: value of entering room r1 in a given state = average over every door layout of the best door + item play there
 const LAc=new Map();
-function LAstats(r1,h,a,b,p,g,k){
+function LAstats(r1,h,a,b,p,g,k,d){
+ d=d||1;
  if(r1>TOT)return{avg:1,min:1,max:1};
  a=Math.min(a,CH);b=Math.min(b,CW);p=Math.min(p,CP);g=Math.min(g,CG);
- const key=[r1,h,a,b,p,g,k].join(),hit=LAc.get(key);if(hit)return hit;
- const n=r1>=37?4:3,s={h,nh:a,nw:b,np:p,ng:g,keys:k,r:r1,lo:false},cc=(x,y,z,u,v)=>A(r1,x,y,z,u,v);
+ const full=d===(S.depth||1),key=[r1,h,a,b,p,g,k,d,full].join(),hit=LAc.get(key);if(hit)return hit;
+ const n=r1>=37?4:3,s={h,nh:a,nw:b,np:p,ng:g,keys:k,r:r1,lo:false},cc=d>1?(x,y,z,u,v)=>LA(r1,x,y,z,u,v,k,d-1):(x,y,z,u,v)=>A(r1,x,y,z,u,v);
  let avg=0,mn=1,mx=0;
- for(const c of combos(n,r1)){const o=evalRoom(s,c.types,EMPTY,EMPTY,{h:1,i:1},cc,c.pr).out.find(x=>!x.locked),v=o?o.ev:0;
+ let L=combos(n,r1);if(!full){L=L.slice().sort((x,y)=>y.w-x.w).slice(0,12);const T=L.reduce((x,c)=>x+c.w,0);L=L.map(c=>({...c,w:c.w/T}))} // deeper levels use the 12 likeliest layouts
+ for(const c of L){const o=evalRoom(s,c.types,EMPTY,EMPTY,{h:1,i:1},cc,c.pr).out.find(x=>!x.locked),v=o?o.ev:0;
   avg+=c.w*v;if(o&&c.w>=.004){mn=Math.min(mn,v);mx=Math.max(mx,v)}}
  const res={avg,min:mn,max:mx};LAc.set(key,res);return res}
-function LA(r,h,a,b,p,g,k){ // value after finishing room r
+function LA(r,h,a,b,p,g,k,d){
+ d=d||S.depth||1; // value after finishing room r
  if(r>=TOT)return 1;
- if(r%9===0)return Math.max(LAstats(r+1,h,a+1,b,p,g,k).avg,LAstats(r+1,h,a,b+1,p,g,k).avg);
- return LAstats(r+1,h,a,b,p,g,k).avg}
+ if(r%9===0)return Math.max(LAstats(r+1,h,a+1,b,p,g,k,d).avg,LAstats(r+1,h,a,b+1,p,g,k,d).avg);
+ return LAstats(r+1,h,a,b,p,g,k,d).avg}
 // best way to play this room given evidence; al={h:may drink heal, i:may use wand / 1-room hearts}. cont(h,heal,wand,phone,hearts)=value after the room (default: one-room lookahead)
 function evalRoom(s,types,G,Z,al,cont,pr0){
  const pr=pr0||enumerate(types,G,Z),m=pr.m,out=[],keys=s.keys||s.lo;
@@ -164,15 +167,16 @@ function advisor(){
   rec=`Open Door ${t.i+1} (${nm(t)}): ${pct(t.g)} ghost chance.`;
   if(held)sub='Keep your items for now. Spending them here would not pay off.'}
  if(ok.length&&t.t==='web'&&held+S.inv.key)sub=(sub?sub+' ':'')+'Careful: web doors steal your items.';
- const rows=a.out.map((x,k)=>`<tr${k===0&&!x.locked?' class="best"':''}><td>Door ${x.i+1} Â· ${nm(x)}</td><td>${x.locked?'locked':(x.uw?'0% <span class="mut">wand</span>':pct(x.g)+(x.ug?` <span class="mut">${x.ug} heart${x.ug>1?'s':''}</span>`:''))}</td><td>${x.locked?'-':pct(x.ev)}</td></tr>`).join('');
+ const rows=a.out.map((x,k)=>`<tr${k===0&&!x.locked?' class="best"':''}><td>Door ${x.i+1} &#183; ${nm(x)}</td><td>${x.locked?'locked':(x.uw?'0% <span class="mut">wand</span>':pct(x.g)+(x.ug?` <span class="mut">${x.ug} heart${x.ug>1?'s':''}</span>`:''))}</td><td>${x.locked?'-':pct(x.ev)}</td></tr>`).join('');
  let look='';
- if(a.t&&p.kind!=='phone'&&a.s.r<TOT&&a.s.r%9!==0){const L=LAstats(a.s.r+1,...a.t.st,a.s.keys);look=`<div class="mut" style="margin-top:6px">If you get through this room, next room looks like <b>${pct(L.avg)}</b> run-clear on average across every door layout (${pct(L.min)} worst layout, ${pct(L.max)} best), playing it optimally.</div>`}
+ if(a.t&&p.kind!=='phone'&&a.s.r<TOT&&a.s.r%9!==0){const L=LAstats(a.s.r+1,...a.t.st,a.s.keys,S.depth||1);look=`<div class="mut" style="margin-top:6px">If you get through this room, looking ${S.depth||1} room${(S.depth||1)>1?'s':''} ahead gives <b>${pct(L.avg)}</b> run-clear on average across every door layout of the next room (${pct(L.min)} worst layout, ${pct(L.max)} best), playing it optimally.</div>`}
  const wr=a.wr?`<div class="mut" style="margin-top:8px">Waiting room: take the <b>${a.wr[0]}</b> (estimated clear chance ${pct(a.wr[1])} vs ${pct(a.wr[2])}). If the heal applies instantly and you are at 3 hearts, take the wand.</div>`:'';
  return `<div class="card"><h2>Advice</h2><div class="rec">${rec}</div>${sub?`<div class="mut" style="margin-top:6px">${sub}</div>`:''}${look}<table style="margin-top:10px"><tr><th>Door</th><th>Ghost</th><th>Run clears</th></tr>${rows}</table>${wr}</div>`}
 function act(a,v,i){
  switch(a){
  case'room':S.room=Math.max(1,Math.min(45,S.room+ +v));newRoom();break;
  case'hearts':S.hearts=+v;break;
+ case'depth':S.depth=+v;break;
  case'inv':{const[k,d]=v.split('|');S.inv[k]=Math.max(0,S.inv[k]+ +d);break}
  case'n':F.n=+v;break;
  case'type':F.doors[i].t=v;break;
@@ -191,16 +195,16 @@ function render(){
  for(let i=0;i<F.n;i++){const d=F.doors[i];
   doors+=`<div class="dr"><b>Door ${i+1}</b><select data-a="type" data-i="${i}">${opts(TYPES,d.t)}</select><button class="g ${d.a?'on':''}" data-a="ghost" data-i="${i}">Arrow / ghost</button><button class="s ${d.b==='safe'?'on':''}" data-a="safe" data-i="${i}">Safe</button></div>`}
  document.getElementById('app').innerHTML=`
- <div class="card"><div class="row sp"><span class="row">Room <button data-a="room" data-v="-1">â</button><span class="big">${S.room}</span><button data-a="room" data-v="1">+</button><span class="mut">/ 45</span></span>
+ <div class="card"><div class="row sp"><span class="row">Room <button data-a="room" data-v="-1">&#8722;</button><span class="big">${S.room}</span><button data-a="room" data-v="1">+</button><span class="mut">/ 45</span></span>
  <span class="row">Hearts ${[1,2,3].map(h=>`<button data-a="hearts" data-v="${h}" class="${S.hearts===h?'on':''}">${h}</button>`).join('')}</span></div>
- <h2 style="margin-top:12px">Your items</h2><div class="row">${ITEMS.map(([k,l])=>`<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">â</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div></div>
+ <h2 style="margin-top:12px">Your items</h2><div class="row">${ITEMS.map(([k,l])=>`<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">&#8722;</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div></div>
  <div class="card"><h2>This room</h2>${doors}
  <div class="row" style="margin-top:4px"><select data-a="n"><option value="3"${F.n===3?' selected':''}>3 doors</option><option value="4"${F.n===4?' selected':''}>4 doors</option></select>
  <button data-a="tog" data-v="locksOff" class="${F.locksOff?'on':''}">Locks removed</button></div>
  <div class="mut" style="margin-top:6px">Set door types, then wait about 10 seconds for other players. Mark the door the phone arrow points at as ghost. Mark a door safe only if you know it is.</div></div>
  ${advisor()}
  <button class="pri" data-a="next">Next room</button>
- <div class="row sp" style="margin-top:10px"><span class="mut">Odds fitted to your logged runs.</span><button data-a="reset">New run</button></div>`;
+ <div class="row sp" style="margin-top:10px"><span class="mut">Look ahead <select data-a="depth">${[1,2,3].map(d=>`<option value="${d}"${(S.depth||1)===d?' selected':''}>${d} room${d>1?'s':''}</option>`).join('')}</select></span><button data-a="reset">New run</button></div>`;
 }
 newRoom();render();
 </script></body></html>
