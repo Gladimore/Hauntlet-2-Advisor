@@ -32,17 +32,21 @@ tr.best td{font-weight:700}
 /* ===== Door advisor =====
  Ghost model fitted to your runs: each room has K ghosts (K=1 in ~76% of 3-door rooms) placed on doors in proportion to a
  risk weight per door type. Evidence (phone arrow, doors known safe) is applied exactly by enumerating ghost sets.
- Future value: dynamic program over room, hearts, heal potions, wands, phones and 1-room hearts. */
+ Future value: dynamic program over room, hearts, heal potions, wands, phones and 1-room hearts, plus an exact one-room lookahead
+ over every possible door layout of the next room. Ghost hits cost 1 heart, or 2 with chance DBL. Item counts have no cap. */
 const WT={'?':1,low:1,mod:1.5,high:2,key:.33,web:.13,nightmare:1.7,bounce:1.27};
 const KP3=[.066,.764,.16,.009],KP4=[.077,.231,.538,.077,.077];
 const PI={'?':.15,low:.14,mod:.4,high:.4,key:.2,web:0,nightmare:.4,bounce:.05}; // chance a door gives a good item (small sample)
 const ARROW=.55,TOT=45,REW=.5;
+const DBL=.06; // assumed: a ghost door holds TWO ghosts (2 hearts of damage) about 6% of the time. Rare, none in your log yet.
+const CH=3,CW=2,CP=3,CG=3; // item counts above these are valued as if equal to the cap in the long-run table (you can hold any number)
+const EMPTY=new Set(),PRI={N:{low:28,mod:17,key:7,high:2},O:{low:26,mod:29,key:29,high:7,nightmare:15,web:16,bounce:6}}; // door-type frequencies from your CSV
 // ten typical rooms per phase: [best-door ghost chance with no arrow, with an arrow] (from the fitted model)
 const QD={N:[[.134,.08],[.15,.093],[.175,.1],[.258,.125],[.289,.134],[.304,.153],[.326,.147],[.326,.148],[.36,.165],[.371,.169]],
  T:[[.065,.053],[.106,.07],[.125,.084],[.139,.086],[.155,.098],[.209,.113],[.269,.13],[.296,.144],[.333,.154],[.363,.165]],
  F:[[.152,.213],[.188,.244],[.205,.26],[.219,.273],[.235,.281],[.258,.286],[.279,.299],[.329,.341],[.37,.37],[.417,.408]]};
 const qd=r=>r<=9?QD.N:r<=36?QD.T:QD.F;
-const ix=(h,a,b,c,d)=>(((h*3+a)*3+b)*4+c)*3+d;
+const ix=(h,a,b,c,d)=>(((h*4+Math.min(a,CH))*3+Math.min(b,CW))*4+Math.min(c,CP))*4+Math.min(d,CG);
 function perms(a){if(a.length<2)return[a];const o=[];a.forEach((x,i)=>perms(a.filter((_,j)=>j!==i)).forEach(p=>o.push([x,...p])));return o}
 function setP(w,S){let t=0;for(const p of perms(S)){let rem=w.reduce((a,b)=>a+b,0),pr=1;for(const i of p){pr*=w[i]/rem;rem-=w[i]}t+=pr}return t}
 function enumerate(types,G,Z){const n=types.length,w=types.map(t=>WT[t]||1),Kp=n===3?KP3:KP4,m=Array(n).fill(0),rev=Array(n).fill(0);let Zs=0,p0=0;
@@ -54,48 +58,74 @@ function enumerate(types,G,Z){const n=types.length,w=types.map(t=>WT[t]||1),Kp=n
 const V=[];
 function A(r,h,a,b,p,g){
  if(r>=TOT)return 1;
- if(r%9===0)return Math.max(V[r+1][ix(h,Math.min(2,a+1),b,p,g)],V[r+1][ix(h,a,Math.min(2,b+1),p,g)]); // waiting room: heal or wand
+ if(r%9===0)return Math.max(V[r+1][ix(h,a+1,b,p,g)],V[r+1][ix(h,a,b+1,p,g)]); // waiting room: heal or wand
  return V[r+1][ix(h,a,b,p,g)]}
-(function build(){for(let r=TOT+1;r>=1;r--){V[r]=new Array(432).fill(0);
- for(let h=0;h<=3;h++)for(let nh=0;nh<3;nh++)for(let nw=0;nw<3;nw++)for(let np=0;np<4;np++)for(let ng=0;ng<3;ng++){
+(function build(){for(let r=TOT+1;r>=1;r--){V[r]=new Array(768).fill(0);
+ for(let h=0;h<=3;h++)for(let nh=0;nh<=CH;nh++)for(let nw=0;nw<=CW;nw++)for(let np=0;np<=CP;np++)for(let ng=0;ng<=CG;ng++){
   if(r>TOT){V[r][ix(h,nh,nw,np,ng)]=1;continue}
   if(h<1)continue;
-  // best use of items in a room whose best door has ghost chance q (arrow = whether an arrow is already showing)
+  // best use of items in a room whose best door has ghost chance q; a ghost hit is 1 heart, or 2 with chance DBL; each 1-room heart absorbs 1
   const play=(q,arrow)=>{let best=0;
-   for(let uh=0;uh<=(nh>0&&h<3?1:0);uh++)for(let im=0;im<=2;im++){
-    if(im===1&&!nw)continue;if(im===2&&!ng)continue;
-    for(let up=0;up<=(np>0&&!im&&!arrow?1:0);up++){
-     const h2=uh?3:h,a=nh-uh,b=nw-(im===1),g=ng-(im===2),qq=im?0:q[up?1:0],pn=up?np-1:np;
-     const v=(1-qq)*A(r,h2,a,b,pn,g)+qq*(h2>1?A(r,h2-1,a,b,pn,g):0);if(v>best)best=v}}
+   for(let uh=0;uh<=(nh>0&&h<3?1:0);uh++)for(let uw=0;uw<=(nw>0?1:0);uw++)for(let ug=0;ug<=(uw?0:Math.min(ng,2));ug++)
+    for(let up=0;up<=(np>0&&!uw&&!ug&&!arrow?1:0);up++){
+     const h2=uh?3:h,a=nh-uh,b=nw-uw,g=ng-ug,qq=uw?0:q[up?1:0],pn=up?np-1:np;
+     const c=x=>x>0?A(r,x,a,b,pn,g):0;
+     const v=(1-qq)*c(h2)+qq*((1-DBL)*c(h2-Math.max(0,1-ug))+DBL*c(h2-Math.max(0,2-ug)));
+     if(v>best)best=v}
    return best};
   let tot=0;const D=qd(r);
   for(const q of D)tot+=ARROW*play([q[1],q[1]],true)+(1-ARROW)*play(q,false);
   V[r][ix(h,nh,nw,np,ng)]=tot/D.length}}})();
-// best way to play this room given evidence; al={h:may drink heal, i:may use wand / 1-room heart}
-function evalRoom(s,types,G,Z,al){
- const pr=enumerate(types,G,Z),m=pr.m,out=[],keys=s.keys||F.locksOff;
+// every possible door layout for a room (multiset of types, weighted by how often each type appears in your log)
+const CB={};
+function combos(n,r){const k=n+(r<=9?'N':'O');if(CB[k])return CB[k];
+ const P=PRI[r<=9?'N':'O'],ts=Object.keys(P),tot=ts.reduce((x,t)=>x+P[t],0),fa=[1,1,2,6,24],res=[];
+ const rec=(st,cur)=>{if(cur.length===n){const cnt={};let w=fa[n];cur.forEach(t=>{cnt[t]=(cnt[t]||0)+1});
+   for(const t in cnt)w=w/fa[cnt[t]]*Math.pow(P[t]/tot,cnt[t]);
+   res.push({types:cur.slice(),w,pr:enumerate(cur,EMPTY,EMPTY)});return}
+  for(let i=st;i<ts.length;i++){cur.push(ts[i]);rec(i,cur);cur.pop()}};
+ rec(0,[]);return CB[k]=res}
+// one-room lookahead: value of entering room r1 in a given state = average over every door layout of the best door + item play there
+const LAc=new Map();
+function LAstats(r1,h,a,b,p,g,k){
+ if(r1>TOT)return{avg:1,min:1,max:1};
+ a=Math.min(a,CH);b=Math.min(b,CW);p=Math.min(p,CP);g=Math.min(g,CG);
+ const key=[r1,h,a,b,p,g,k].join(),hit=LAc.get(key);if(hit)return hit;
+ const n=r1>=37?4:3,s={h,nh:a,nw:b,np:p,ng:g,keys:k,r:r1,lo:false},cc=(x,y,z,u,v)=>A(r1,x,y,z,u,v);
+ let avg=0,mn=1,mx=0;
+ for(const c of combos(n,r1)){const o=evalRoom(s,c.types,EMPTY,EMPTY,{h:1,i:1},cc,c.pr).out.find(x=>!x.locked),v=o?o.ev:0;
+  avg+=c.w*v;if(o&&c.w>=.004){mn=Math.min(mn,v);mx=Math.max(mx,v)}}
+ const res={avg,min:mn,max:mx};LAc.set(key,res);return res}
+function LA(r,h,a,b,p,g,k){ // value after finishing room r
+ if(r>=TOT)return 1;
+ if(r%9===0)return Math.max(LAstats(r+1,h,a+1,b,p,g,k).avg,LAstats(r+1,h,a,b+1,p,g,k).avg);
+ return LAstats(r+1,h,a,b,p,g,k).avg}
+// best way to play this room given evidence; al={h:may drink heal, i:may use wand / 1-room hearts}. cont(h,heal,wand,phone,hearts)=value after the room (default: one-room lookahead)
+function evalRoom(s,types,G,Z,al,cont,pr0){
+ const pr=pr0||enumerate(types,G,Z),m=pr.m,out=[],keys=s.keys||s.lo;
+ const C=cont||((h,a,b,p,g)=>LA(s.r,h,a,b,p,g,s.keys||0)),f=(h,a,b,p,g)=>h>0?C(h,a,b,p,g):0;
  for(let i=0;i<types.length;i++){
   const t=types[i];
   if(t==='key'&&!keys){out.push({i,t,g:m[i],locked:true,ev:-1});continue}
   let best=null;
-  for(let uh=0;uh<=(al.h&&s.nh>0&&s.h<3?1:0);uh++)for(let im=0;im<=(al.i?2:0);im++){
-   if(im===1&&!s.nw)continue;if(im===2&&!s.ng)continue;
-   const h2=uh?3:s.h;let a=s.nh-uh,b=s.nw-(im===1),g=s.ng-(im===2),p=s.np;
+  for(let uh=0;uh<=(al.h&&s.nh>0&&s.h<3?1:0);uh++)for(let uw=0;uw<=(al.i&&s.nw>0?1:0);uw++)for(let ug=0;ug<=(al.i&&!uw?Math.min(s.ng,2):0);ug++){
+   const h2=uh?3:s.h;let a=s.nh-uh,b=s.nw-uw,g=s.ng-ug,p=s.np;
    if(t==='web'){a=0;b=0;g=0;p=0}
-   const gh=im?0:m[i],base=A(s.r,h2,a,b,p,g);
-   let ev=(1-gh)*base+gh*(h2>1?A(s.r,h2-1,a,b,p,g):0);
-   if(gh<1&&PI[t]){const gain=(A(s.r,h2,Math.min(2,a+1),b,p,g)+A(s.r,h2,a,b,Math.min(3,p+1),g)+A(s.r,h2,a,b,p,Math.min(2,g+1)))/3-base;ev+=REW*PI[t]*(1-gh)*gain}
-   if(!best||ev>best.ev)best={i,t,g:m[i],ev,uh,im}}
+   const gh=uw?0:m[i];
+   let ev=(1-gh)*f(h2,a,b,p,g)+gh*((1-DBL)*f(h2-Math.max(0,1-ug),a,b,p,g)+DBL*f(h2-Math.max(0,2-ug),a,b,p,g));
+   const ip=REW*(PI[t]||0)*(1-gh);
+   if(ip>0)ev+=ip*((f(h2,a+1,b,p,g)+f(h2,a,b,p+1,g)+f(h2,a,b,p,g+1))/3-f(h2,a,b,p,g));
+   if(!best||ev>best.ev)best={i,t,g:m[i],ev,uh,uw,ug,st:[h2,a,b,p,g]}}
   out.push(best)}
- out.sort((x,y)=>y.ev-x.ev);return{out,pr}}
+ out.sort((x,y)=>(Math.round(y.ev*1000)-Math.round(x.ev*1000))||(x.g-y.g));return{out,pr}}
 function advise(){
  const n=F.n,types=F.doors.slice(0,n).map(d=>d.t),G=new Set(),Z=new Set();
  F.doors.slice(0,n).forEach((d,i)=>{if(d.a||d.b==='ghost')G.add(i);if(d.b==='safe')Z.add(i)});
- const s={h:Math.max(1,Math.min(3,S.hearts)),nh:Math.min(2,S.inv.heart_potion),nw:Math.min(2,S.inv.wand),np:Math.min(3,S.inv.phone),ng:Math.min(2,S.inv.ghost_potion),keys:S.inv.key,r:Math.min(S.room,TOT)};
+ const s={h:Math.max(1,Math.min(3,S.hearts)),nh:S.inv.heart_potion,nw:S.inv.wand,np:S.inv.phone,ng:S.inv.ghost_potion,keys:S.inv.key,lo:F.locksOff,r:Math.min(S.room,TOT)};
  const th=s.h===3?.03:s.h===2?.015:.005,none=evalRoom(s,types,G,Z,{h:0,i:0}),all=evalRoom(s,types,G,Z,{h:1,i:1});
  const a0=none.out.find(x=>!x.locked),a1=all.out.find(x=>!x.locked);
  let plan={kind:'none',gain:0},table=none.out;
- if(a0&&a1&&a1.ev-a0.ev>=th){plan={kind:'use',gain:a1.ev-a0.ev,uh:a1.uh,im:a1.im};table=all.out}
+ if(a0&&a1&&a1.ev-a0.ev>=th){plan={kind:'use',gain:a1.ev-a0.ev,uh:a1.uh,uw:a1.uw,ug:a1.ug};table=all.out}
  const base=a1?a1.ev:0;
  let phone=null;
  if(s.np>0&&!G.size&&a0){ // phone reveals a random ghost door: average the best follow-up over what it could show
@@ -105,8 +135,8 @@ function advise(){
   phone={ev,gain:ev-base};
   if(phone.gain>=th)plan={kind:'phone',gain:phone.gain,after:plan}}
  let wr=null;
- if(S.room>1&&S.room%9===1){const hv=V[s.r][ix(s.h,Math.min(2,s.nh+1),s.nw,s.np,s.ng)],wv=V[s.r][ix(s.h,s.nh,Math.min(2,s.nw+1),s.np,s.ng)];wr=hv>=wv?['heal potion',hv,wv]:['wand',wv,hv]}
- return{out:table,plan,wr,s}}
+ if(S.room>1&&S.room%9===1){const hv=V[s.r][ix(s.h,s.nh+1,s.nw,s.np,s.ng)],wv=V[s.r][ix(s.h,s.nh,s.nw+1,s.np,s.ng)];wr=hv>=wv?['heal potion',hv,wv]:['wand',wv,hv]}
+ return{out:table,plan,wr,s,t:(table.find(x=>!x.locked)||null)}}
 const TYPES=['?','low','mod','high','key','web','nightmare','bounce'];
 const ITEMS=[['heart_potion','heal potion',2],['wand','wand',2],['phone','phone',3],['ghost_potion','1-room heart',2],['key','key',3]];
 function load(){try{const s=JSON.parse(localStorage.getItem('h2adv'));return s&&s.inv?s:null}catch(e){return null}}
@@ -126,22 +156,24 @@ function advisor(){
   rec=`Use your phone now, then tap "Arrow / ghost" on the door it points at and I will re-rank (about +${pp(p.gain)} run-clear chance).`;
   sub=`Without it: Door ${t.i+1} (${nm(t)}), ${pct(t.g)} ghost chance.`}
  else if(p.kind==='use'){
-  const st=[];if(p.uh)st.push('drink your heal potion');if(p.im===1)st.push('use your wand (every door becomes safe)');if(p.im===2)st.push('drink your 1-room heart');
+  const st=[];if(p.uh)st.push('drink your heal potion');if(p.uw)st.push('use your wand (every door becomes safe)');if(p.ug)st.push(p.ug>1?'drink 2 of your 1-room hearts':'drink a 1-room heart');
   const first=st.join(', then ');
-  rec=first.charAt(0).toUpperCase()+first.slice(1)+'. '+(p.im?`Then open Door ${t.i+1} (${nm(t)}), the best item chance since no door can hurt you.`:`Then open Door ${t.i+1} (${nm(t)}), ${pct(t.g)} ghost chance.`);
-  sub=`Worth about +${pp(p.gain)} run-clear chance.`}
+  rec=first.charAt(0).toUpperCase()+first.slice(1)+'. '+(p.uw?`Then open Door ${t.i+1} (${nm(t)}), the best item chance since no door can hurt you.`:p.ug?`Then open Door ${t.i+1} (${nm(t)}): ${pct(t.g)} ghost chance, ${p.ug>1?'and the hearts cover even a double ghost':'the heart absorbs one hit'}.`:`Then open Door ${t.i+1} (${nm(t)}), ${pct(t.g)} ghost chance.`);
+  sub=`Worth about +${pp(p.gain)} run-clear chance.`+(p.ug===1?` A rare double ghost (assumed ${pct(DBL)} of ghost doors) would still cost you a heart.`:'')}
  else{
   rec=`Open Door ${t.i+1} (${nm(t)}): ${pct(t.g)} ghost chance.`;
   if(held)sub='Keep your items for now. Spending them here would not pay off.'}
  if(ok.length&&t.t==='web'&&held+S.inv.key)sub=(sub?sub+' ':'')+'Careful: web doors steal your items.';
- const rows=a.out.map((x,k)=>`<tr${k===0&&!x.locked?' class="best"':''}><td>Door ${x.i+1} · ${nm(x)}</td><td>${x.locked?'locked':pct(p.kind==='use'&&p.im?0:x.g)}</td><td>${x.locked?'-':pct(x.ev)}</td></tr>`).join('');
+ const rows=a.out.map((x,k)=>`<tr${k===0&&!x.locked?' class="best"':''}><td>Door ${x.i+1} Â· ${nm(x)}</td><td>${x.locked?'locked':(x.uw?'0% <span class="mut">wand</span>':pct(x.g)+(x.ug?` <span class="mut">${x.ug} heart${x.ug>1?'s':''}</span>`:''))}</td><td>${x.locked?'-':pct(x.ev)}</td></tr>`).join('');
+ let look='';
+ if(a.t&&p.kind!=='phone'&&a.s.r<TOT&&a.s.r%9!==0){const L=LAstats(a.s.r+1,...a.t.st,a.s.keys);look=`<div class="mut" style="margin-top:6px">If you get through this room, next room looks like <b>${pct(L.avg)}</b> run-clear on average across every door layout (${pct(L.min)} worst layout, ${pct(L.max)} best), playing it optimally.</div>`}
  const wr=a.wr?`<div class="mut" style="margin-top:8px">Waiting room: take the <b>${a.wr[0]}</b> (estimated clear chance ${pct(a.wr[1])} vs ${pct(a.wr[2])}). If the heal applies instantly and you are at 3 hearts, take the wand.</div>`:'';
- return `<div class="card"><h2>Advice</h2><div class="rec">${rec}</div>${sub?`<div class="mut" style="margin-top:6px">${sub}</div>`:''}<table style="margin-top:10px"><tr><th>Door</th><th>Ghost</th><th>Run clears</th></tr>${rows}</table>${wr}</div>`}
+ return `<div class="card"><h2>Advice</h2><div class="rec">${rec}</div>${sub?`<div class="mut" style="margin-top:6px">${sub}</div>`:''}${look}<table style="margin-top:10px"><tr><th>Door</th><th>Ghost</th><th>Run clears</th></tr>${rows}</table>${wr}</div>`}
 function act(a,v,i){
  switch(a){
  case'room':S.room=Math.max(1,Math.min(45,S.room+ +v));newRoom();break;
  case'hearts':S.hearts=+v;break;
- case'inv':{const[k,d]=v.split('|');const mx=ITEMS.find(x=>x[0]===k)[2];S.inv[k]=Math.max(0,Math.min(mx,S.inv[k]+ +d));break}
+ case'inv':{const[k,d]=v.split('|');S.inv[k]=Math.max(0,S.inv[k]+ +d);break}
  case'n':F.n=+v;break;
  case'type':F.doors[i].t=v;break;
  case'ghost':{const d=F.doors[i];d.a=!d.a;if(d.a)d.b='?';break}
@@ -159,9 +191,9 @@ function render(){
  for(let i=0;i<F.n;i++){const d=F.doors[i];
   doors+=`<div class="dr"><b>Door ${i+1}</b><select data-a="type" data-i="${i}">${opts(TYPES,d.t)}</select><button class="g ${d.a?'on':''}" data-a="ghost" data-i="${i}">Arrow / ghost</button><button class="s ${d.b==='safe'?'on':''}" data-a="safe" data-i="${i}">Safe</button></div>`}
  document.getElementById('app').innerHTML=`
- <div class="card"><div class="row sp"><span class="row">Room <button data-a="room" data-v="-1">−</button><span class="big">${S.room}</span><button data-a="room" data-v="1">+</button><span class="mut">/ 45</span></span>
+ <div class="card"><div class="row sp"><span class="row">Room <button data-a="room" data-v="-1">â</button><span class="big">${S.room}</span><button data-a="room" data-v="1">+</button><span class="mut">/ 45</span></span>
  <span class="row">Hearts ${[1,2,3].map(h=>`<button data-a="hearts" data-v="${h}" class="${S.hearts===h?'on':''}">${h}</button>`).join('')}</span></div>
- <h2 style="margin-top:12px">Your items</h2><div class="row">${ITEMS.map(([k,l])=>`<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">−</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div></div>
+ <h2 style="margin-top:12px">Your items</h2><div class="row">${ITEMS.map(([k,l])=>`<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">â</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div></div>
  <div class="card"><h2>This room</h2>${doors}
  <div class="row" style="margin-top:4px"><select data-a="n"><option value="3"${F.n===3?' selected':''}>3 doors</option><option value="4"${F.n===4?' selected':''}>4 doors</option></select>
  <button data-a="tog" data-v="locksOff" class="${F.locksOff?'on':''}">Locks removed</button></div>
