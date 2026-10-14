@@ -1,210 +1,1525 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Hauntlet 2 Advisor</title>
-<style>
-:root{--bg:#f6f4fa;--fg:#1c1a22;--card:#fff;--bd:#d9d4e3;--ac:#6d28d9;--mut:#6b6677;--ok:#15803d;--bad:#b91c1c;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
-@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#15131a;--fg:#ece9f3;--card:#211e29;--bd:#3a3547;--ac:#a78bfa;--mut:#a29cb0;--ok:#4ade80;--bad:#f87171}}
-:root[data-theme="dark"]{--bg:#15131a;--fg:#ece9f3;--card:#211e29;--bd:#3a3547;--ac:#a78bfa;--mut:#a29cb0;--ok:#4ade80;--bad:#f87171}
-html{scroll-padding-top:env(safe-area-inset-top,0px)}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Arial,sans-serif}
-#app{max-width:520px;margin:0 auto;padding:12px}
-.card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin-bottom:10px}
-h2{font-size:12px;margin:0 0 8px;color:var(--mut);text-transform:uppercase;letter-spacing:.05em}
-.row{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.sp{justify-content:space-between}
-button,select{font:inherit;color:var(--fg);background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:6px 12px;min-height:40px}
-button.on{background:var(--ac);color:#fff;border-color:var(--ac)}
-button.g.on{background:var(--bad);border-color:var(--bad)}
-button.s.on{background:var(--ok);border-color:var(--ok);color:#06210f}
-button.pri{background:var(--ac);color:#fff;border-color:var(--ac);font-weight:600;width:100%;min-height:46px}
-.dr{border:1px solid var(--bd);border-radius:10px;padding:8px;margin-bottom:6px;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
-.inv{display:flex;gap:4px;align-items:center;border:1px solid var(--bd);border-radius:10px;padding:2px 4px}
-.inv button{min-height:32px;padding:2px 10px}
-.big{font-size:20px;font-weight:700;min-width:24px;text-align:center}
-.mut{color:var(--mut);font-size:13px}
-.rec{font-size:18px;font-weight:700;line-height:1.3}
-table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:5px 6px;border-bottom:1px solid var(--bd);text-align:left}
-tr.best td{font-weight:700}
-</style></head><body><div id="app"></div>
-<script>
-/* ===== Door advisor =====
- Ghost model fitted to your runs: each room has K ghosts (K=1 in ~76% of 3-door rooms) placed on doors in proportion to a
- risk weight per door type. Evidence (phone arrow, doors known safe) is applied exactly by enumerating ghost sets.
- Future value: dynamic program over room, hearts, heal potions, wands, phones and 1-room hearts, plus an exact one-room lookahead
- over every possible door layout of the next room. Ghost hits cost 1 heart, or 2 with chance DBL. Item counts have no cap. */
-const WT={'?':1,low:1,mod:1.5,high:2,key:.33,web:.13,nightmare:1.7,bounce:1.27};
-const KP3=[.066,.764,.16,.009],KP4=[.077,.231,.538,.077,.077];
-const PI={'?':.15,low:.14,mod:.4,high:.4,key:.2,web:0,nightmare:.4,bounce:.05}; // chance a door gives a good item (small sample)
-const ARROW=.55,TOT=45,REW=.5;
-const DBL=.06; // assumed: a ghost door holds TWO ghosts (2 hearts of damage) about 6% of the time. Rare, none in your log yet.
-const CH=3,CW=2,CP=3,CG=3; // item counts above these are valued as if equal to the cap in the long-run table (you can hold any number)
-const EMPTY=new Set(),PRI={N:{low:28,mod:17,key:7,high:2},O:{low:26,mod:29,key:29,high:7,nightmare:15,web:16,bounce:6}}; // door-type frequencies from your CSV
-// ten typical rooms per phase: [best-door ghost chance with no arrow, with an arrow] (from the fitted model)
-const QD={N:[[.134,.08],[.15,.093],[.175,.1],[.258,.125],[.289,.134],[.304,.153],[.326,.147],[.326,.148],[.36,.165],[.371,.169]],
- T:[[.065,.053],[.106,.07],[.125,.084],[.139,.086],[.155,.098],[.209,.113],[.269,.13],[.296,.144],[.333,.154],[.363,.165]],
- F:[[.152,.213],[.188,.244],[.205,.26],[.219,.273],[.235,.281],[.258,.286],[.279,.299],[.329,.341],[.37,.37],[.417,.408]]};
-const qd=r=>r<=9?QD.N:r<=36?QD.T:QD.F;
-const ix=(h,a,b,c,d)=>(((h*4+Math.min(a,CH))*3+Math.min(b,CW))*4+Math.min(c,CP))*4+Math.min(d,CG);
-function perms(a){if(a.length<2)return[a];const o=[];a.forEach((x,i)=>perms(a.filter((_,j)=>j!==i)).forEach(p=>o.push([x,...p])));return o}
-function setP(w,S){let t=0;for(const p of perms(S)){let rem=w.reduce((a,b)=>a+b,0),pr=1;for(const i of p){pr*=w[i]/rem;rem-=w[i]}t+=pr}return t}
-function enumerate(types,G,Z){const n=types.length,w=types.map(t=>WT[t]||1),Kp=n===3?KP3:KP4,m=Array(n).fill(0),rev=Array(n).fill(0);let Zs=0,p0=0;
- for(let mask=0;mask<(1<<n);mask++){let ok=true;const S=[];for(let i=0;i<n;i++){const b=(mask>>i)&1;if(b)S.push(i);if(G.has(i)&&!b)ok=false;if(Z.has(i)&&b)ok=false}
-  if(!ok)continue;const pr=(Kp[S.length]||0)*(S.length?setP(w,S):1);Zs+=pr;if(!S.length)p0+=pr;S.forEach(i=>{m[i]+=pr;rev[i]+=pr/S.length})}
- if(Zs<=0)return{m:types.map((_,i)=>G.has(i)?1:0),rev:types.map(()=>0),p0:0};
- return{m:m.map(x=>x/Zs),rev:rev.map(x=>x/Zs),p0:p0/Zs}}
-// V[r][ix(h,heal,wand,phone,tempHeart)] = chance of clearing all rooms from room r on
-const V=[];
-function A(r,h,a,b,p,g){
- if(r>=TOT)return 1;
- if(r%9===0)return Math.max(V[r+1][ix(h,a+1,b,p,g)],V[r+1][ix(h,a,b+1,p,g)]); // waiting room: heal or wand
- return V[r+1][ix(h,a,b,p,g)]}
-(function build(){for(let r=TOT+1;r>=1;r--){V[r]=new Array(768).fill(0);
- for(let h=0;h<=3;h++)for(let nh=0;nh<=CH;nh++)for(let nw=0;nw<=CW;nw++)for(let np=0;np<=CP;np++)for(let ng=0;ng<=CG;ng++){
-  if(r>TOT){V[r][ix(h,nh,nw,np,ng)]=1;continue}
-  if(h<1)continue;
-  // best use of items in a room whose best door has ghost chance q; a ghost hit is 1 heart, or 2 with chance DBL; each 1-room heart absorbs 1
-  const play=(q,arrow)=>{let best=0;
-   for(let uh=0;uh<=(nh>0&&h<3?1:0);uh++)for(let uw=0;uw<=(nw>0?1:0);uw++)for(let ug=0;ug<=(uw?0:Math.min(ng,2));ug++)
-    for(let up=0;up<=(np>0&&!uw&&!ug&&!arrow?1:0);up++){
-     const h2=uh?3:h,a=nh-uh,b=nw-uw,g=ng-ug,qq=uw?0:q[up?1:0],pn=up?np-1:np;
-     const c=x=>x>0?A(r,x,a,b,pn,g):0;
-     const v=(1-qq)*c(h2)+qq*((1-DBL)*c(h2-Math.max(0,1-ug))+DBL*c(h2-Math.max(0,2-ug)));
-     if(v>best)best=v}
-   return best};
-  let tot=0;const D=qd(r);
-  for(const q of D)tot+=ARROW*play([q[1],q[1]],true)+(1-ARROW)*play(q,false);
-  V[r][ix(h,nh,nw,np,ng)]=tot/D.length}}})();
-// every possible door layout for a room (multiset of types, weighted by how often each type appears in your log)
-const CB={};
-function combos(n,r){const k=n+(r<=9?'N':'O');if(CB[k])return CB[k];
- const P=PRI[r<=9?'N':'O'],ts=Object.keys(P),tot=ts.reduce((x,t)=>x+P[t],0),fa=[1,1,2,6,24],res=[];
- const rec=(st,cur)=>{if(cur.length===n){const cnt={};let w=fa[n];cur.forEach(t=>{cnt[t]=(cnt[t]||0)+1});
-   for(const t in cnt)w=w/fa[cnt[t]]*Math.pow(P[t]/tot,cnt[t]);
-   res.push({types:cur.slice(),w,pr:enumerate(cur,EMPTY,EMPTY)});return}
-  for(let i=st;i<ts.length;i++){cur.push(ts[i]);rec(i,cur);cur.pop()}};
- rec(0,[]);return CB[k]=res}
-// one-room lookahead: value of entering room r1 in a given state = average over every door layout of the best door + item play there
-const LAc=new Map();
-function LAstats(r1,h,a,b,p,g,k,d){
- d=d||1;
- if(r1>TOT)return{avg:1,min:1,max:1};
- a=Math.min(a,CH);b=Math.min(b,CW);p=Math.min(p,CP);g=Math.min(g,CG);
- const full=d===(S.depth||1),key=[r1,h,a,b,p,g,k,d,full].join(),hit=LAc.get(key);if(hit)return hit;
- const n=r1>=37?4:3,s={h,nh:a,nw:b,np:p,ng:g,keys:k,r:r1,lo:false},cc=d>1?(x,y,z,u,v)=>LA(r1,x,y,z,u,v,k,d-1):(x,y,z,u,v)=>A(r1,x,y,z,u,v);
- let avg=0,mn=1,mx=0;
- let L=combos(n,r1);if(!full){L=L.slice().sort((x,y)=>y.w-x.w).slice(0,12);const T=L.reduce((x,c)=>x+c.w,0);L=L.map(c=>({...c,w:c.w/T}))} // deeper levels use the 12 likeliest layouts
- for(const c of L){const o=evalRoom(s,c.types,EMPTY,EMPTY,{h:1,i:1},cc,c.pr).out.find(x=>!x.locked),v=o?o.ev:0;
-  avg+=c.w*v;if(o&&c.w>=.004){mn=Math.min(mn,v);mx=Math.max(mx,v)}}
- const res={avg,min:mn,max:mx};LAc.set(key,res);return res}
-function LA(r,h,a,b,p,g,k,d){
- d=d||S.depth||1; // value after finishing room r
- if(r>=TOT)return 1;
- if(r%9===0)return Math.max(LAstats(r+1,h,a+1,b,p,g,k,d).avg,LAstats(r+1,h,a,b+1,p,g,k,d).avg);
- return LAstats(r+1,h,a,b,p,g,k,d).avg}
-// best way to play this room given evidence; al={h:may drink heal, i:may use wand / 1-room hearts}. cont(h,heal,wand,phone,hearts)=value after the room (default: one-room lookahead)
-function evalRoom(s,types,G,Z,al,cont,pr0){
- const pr=pr0||enumerate(types,G,Z),m=pr.m,out=[],keys=s.keys||s.lo;
- const C=cont||((h,a,b,p,g)=>LA(s.r,h,a,b,p,g,s.keys||0)),f=(h,a,b,p,g)=>h>0?C(h,a,b,p,g):0;
- for(let i=0;i<types.length;i++){
-  const t=types[i];
-  if(t==='key'&&!keys){out.push({i,t,g:m[i],locked:true,ev:-1});continue}
-  let best=null;
-  for(let uh=0;uh<=(al.h&&s.nh>0&&s.h<3?1:0);uh++)for(let uw=0;uw<=(al.i&&s.nw>0?1:0);uw++)for(let ug=0;ug<=(al.i&&!uw?Math.min(s.ng,2):0);ug++){
-   const h2=uh?3:s.h;let a=s.nh-uh,b=s.nw-uw,g=s.ng-ug,p=s.np;
-   if(t==='web'){a=0;b=0;g=0;p=0}
-   const gh=uw?0:m[i];
-   let ev=(1-gh)*f(h2,a,b,p,g)+gh*((1-DBL)*f(h2-Math.max(0,1-ug),a,b,p,g)+DBL*f(h2-Math.max(0,2-ug),a,b,p,g));
-   const ip=REW*(PI[t]||0)*(1-gh);
-   if(ip>0)ev+=ip*((f(h2,a+1,b,p,g)+f(h2,a,b,p+1,g)+f(h2,a,b,p,g+1))/3-f(h2,a,b,p,g));
-   if(!best||ev>best.ev)best={i,t,g:m[i],ev,uh,uw,ug,st:[h2,a,b,p,g]}}
-  out.push(best)}
- out.sort((x,y)=>(Math.round(y.ev*1000)-Math.round(x.ev*1000))||(x.g-y.g));return{out,pr}}
-function advise(){
- const n=F.n,types=F.doors.slice(0,n).map(d=>d.t),G=new Set(),Z=new Set();
- F.doors.slice(0,n).forEach((d,i)=>{if(d.a||d.b==='ghost')G.add(i);if(d.b==='safe')Z.add(i)});
- const s={h:Math.max(1,Math.min(3,S.hearts)),nh:S.inv.heart_potion,nw:S.inv.wand,np:S.inv.phone,ng:S.inv.ghost_potion,keys:S.inv.key,lo:F.locksOff,r:Math.min(S.room,TOT)};
- const th=s.h===3?.03:s.h===2?.015:.005,none=evalRoom(s,types,G,Z,{h:0,i:0}),all=evalRoom(s,types,G,Z,{h:1,i:1});
- const a0=none.out.find(x=>!x.locked),a1=all.out.find(x=>!x.locked);
- let plan={kind:'none',gain:0},table=none.out;
- if(a0&&a1&&a1.ev-a0.ev>=th){plan={kind:'use',gain:a1.ev-a0.ev,uh:a1.uh,uw:a1.uw,ug:a1.ug};table=all.out}
- const base=a1?a1.ev:0;
- let phone=null;
- if(s.np>0&&!G.size&&a0){ // phone reveals a random ghost door: average the best follow-up over what it could show
-  const pr=none.pr,s2={...s,np:s.np-1};let ev=0,pw=0;
-  for(let j=0;j<n;j++){if(pr.rev[j]<=0)continue;const r=evalRoom(s2,types,new Set([j]),Z,{h:1,i:1}).out.find(x=>!x.locked);ev+=pr.rev[j]*(r?r.ev:0);pw+=pr.rev[j]}
-  const e0=evalRoom(s2,types,G,Z,{h:1,i:1}).out.find(x=>!x.locked);ev+=Math.max(0,1-pw)*(e0?e0.ev:0);
-  phone={ev,gain:ev-base};
-  if(phone.gain>=th)plan={kind:'phone',gain:phone.gain,after:plan}}
- let wr=null;
- if(S.room>1&&S.room%9===1){const hv=V[s.r][ix(s.h,s.nh+1,s.nw,s.np,s.ng)],wv=V[s.r][ix(s.h,s.nh,s.nw+1,s.np,s.ng)];wr=hv>=wv?['heal potion',hv,wv]:['wand',wv,hv]}
- return{out:table,plan,wr,s,t:(table.find(x=>!x.locked)||null)}}
-const TYPES=['?','low','mod','high','key','web','nightmare','bounce'];
-const ITEMS=[['heart_potion','heal potion',2],['wand','wand',2],['phone','phone',3],['ghost_potion','1-room heart',2],['key','key',3]];
-function load(){try{const s=JSON.parse(localStorage.getItem('h2adv'));return s&&s.inv?s:null}catch(e){return null}}
-function persist(){try{localStorage.setItem('h2adv',JSON.stringify(S))}catch(e){}}
-const fresh=()=>({room:1,hearts:3,inv:{heart_potion:0,wand:0,phone:0,ghost_potion:0,key:0}});
-var S=load()||fresh(),F;
-S.inv=Object.assign(fresh().inv,S.inv);
-function newRoom(){F={n:S.room>=37?4:3,doors:[0,1,2,3].map(()=>({t:'?',b:'?',a:false})),locksOff:false}}
-const pct=x=>Math.round(x*100)+'%',pp=x=>(x*100).toFixed(1)+'%';
-const opts=(l,c)=>l.map(x=>`<option value="${x}"${x===c?' selected':''}>${x==='?'?'door type':x}</option>`).join('');
-function advisor(){
- const a=advise(),p=a.plan,ok=a.out.filter(x=>!x.locked),t=ok[0],nm=x=>x.t==='?'?'unknown type':x.t;
- const held=S.inv.heart_potion+S.inv.wand+S.inv.phone+S.inv.ghost_potion;
- let rec,sub='';
- if(!ok.length)rec='Every door is locked. You need a key, or wait to see if someone uses one.';
- else if(p.kind==='phone'){
-  rec=`Use your phone now, then tap "Arrow / ghost" on the door it points at and I will re-rank (about +${pp(p.gain)} run-clear chance).`;
-  sub=`Without it: Door ${t.i+1} (${nm(t)}), ${pct(t.g)} ghost chance.`}
- else if(p.kind==='use'){
-  const st=[];if(p.uh)st.push('drink your heal potion');if(p.uw)st.push('use your wand (every door becomes safe)');if(p.ug)st.push(p.ug>1?'drink 2 of your 1-room hearts':'drink a 1-room heart');
-  const first=st.join(', then ');
-  rec=first.charAt(0).toUpperCase()+first.slice(1)+'. '+(p.uw?`Then open Door ${t.i+1} (${nm(t)}), the best item chance since no door can hurt you.`:p.ug?`Then open Door ${t.i+1} (${nm(t)}): ${pct(t.g)} ghost chance, ${p.ug>1?'and the hearts cover even a double ghost':'the heart absorbs one hit'}.`:`Then open Door ${t.i+1} (${nm(t)}), ${pct(t.g)} ghost chance.`);
-  sub=`Worth about +${pp(p.gain)} run-clear chance.`+(p.ug===1?` A rare double ghost (assumed ${pct(DBL)} of ghost doors) would still cost you a heart.`:'')}
- else{
-  rec=`Open Door ${t.i+1} (${nm(t)}): ${pct(t.g)} ghost chance.`;
-  if(held)sub='Keep your items for now. Spending them here would not pay off.'}
- if(ok.length&&t.t==='web'&&held+S.inv.key)sub=(sub?sub+' ':'')+'Careful: web doors steal your items.';
- const rows=a.out.map((x,k)=>`<tr${k===0&&!x.locked?' class="best"':''}><td>Door ${x.i+1} &#183; ${nm(x)}</td><td>${x.locked?'locked':(x.uw?'0% <span class="mut">wand</span>':pct(x.g)+(x.ug?` <span class="mut">${x.ug} heart${x.ug>1?'s':''}</span>`:''))}</td><td>${x.locked?'-':pct(x.ev)}</td></tr>`).join('');
- let look='';
- if(a.t&&p.kind!=='phone'&&a.s.r<TOT&&a.s.r%9!==0){const L=LAstats(a.s.r+1,...a.t.st,a.s.keys,S.depth||1);look=`<div class="mut" style="margin-top:6px">If you get through this room, looking ${S.depth||1} room${(S.depth||1)>1?'s':''} ahead gives <b>${pct(L.avg)}</b> run-clear on average across every door layout of the next room (${pct(L.min)} worst layout, ${pct(L.max)} best), playing it optimally.</div>`}
- const wr=a.wr?`<div class="mut" style="margin-top:8px">Waiting room: take the <b>${a.wr[0]}</b> (estimated clear chance ${pct(a.wr[1])} vs ${pct(a.wr[2])}). If the heal applies instantly and you are at 3 hearts, take the wand.</div>`:'';
- return `<div class="card"><h2>Advice</h2><div class="rec">${rec}</div>${sub?`<div class="mut" style="margin-top:6px">${sub}</div>`:''}${look}<table style="margin-top:10px"><tr><th>Door</th><th>Ghost</th><th>Run clears</th></tr>${rows}</table>${wr}</div>`}
-function act(a,v,i){
- switch(a){
- case'room':S.room=Math.max(1,Math.min(45,S.room+ +v));newRoom();break;
- case'hearts':S.hearts=+v;break;
- case'depth':S.depth=+v;break;
- case'inv':{const[k,d]=v.split('|');S.inv[k]=Math.max(0,S.inv[k]+ +d);break}
- case'n':F.n=+v;break;
- case'type':F.doors[i].t=v;break;
- case'ghost':{const d=F.doors[i];d.a=!d.a;if(d.a)d.b='?';break}
- case'safe':{const d=F.doors[i];d.b=d.b==='safe'?'?':'safe';if(d.b==='safe')d.a=false;break}
- case'tog':F[v]=!F[v];break;
- case'next':S.room=Math.min(45,S.room+1);newRoom();break;
- case'reset':S=fresh();newRoom();break;
- }
- persist();render();
-}
-document.addEventListener('click',e=>{const b=e.target.closest('button');if(!b||!b.dataset.a)return;act(b.dataset.a,b.dataset.v,+b.dataset.i)});
-document.addEventListener('change',e=>{const t=e.target;if(!t.dataset||!t.dataset.a)return;act(t.dataset.a,t.value,+t.dataset.i)});
-function render(){
- let doors='';
- for(let i=0;i<F.n;i++){const d=F.doors[i];
-  doors+=`<div class="dr"><b>Door ${i+1}</b><select data-a="type" data-i="${i}">${opts(TYPES,d.t)}</select><button class="g ${d.a?'on':''}" data-a="ghost" data-i="${i}">Arrow / ghost</button><button class="s ${d.b==='safe'?'on':''}" data-a="safe" data-i="${i}">Safe</button></div>`}
- document.getElementById('app').innerHTML=`
- <div class="card"><div class="row sp"><span class="row">Room <button data-a="room" data-v="-1">&#8722;</button><span class="big">${S.room}</span><button data-a="room" data-v="1">+</button><span class="mut">/ 45</span></span>
- <span class="row">Hearts ${[1,2,3].map(h=>`<button data-a="hearts" data-v="${h}" class="${S.hearts===h?'on':''}">${h}</button>`).join('')}</span></div>
- <h2 style="margin-top:12px">Your items</h2><div class="row">${ITEMS.map(([k,l])=>`<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">&#8722;</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div></div>
- <div class="card"><h2>This room</h2>${doors}
- <div class="row" style="margin-top:4px"><select data-a="n"><option value="3"${F.n===3?' selected':''}>3 doors</option><option value="4"${F.n===4?' selected':''}>4 doors</option></select>
- <button data-a="tog" data-v="locksOff" class="${F.locksOff?'on':''}">Locks removed</button></div>
- <div class="mut" style="margin-top:6px">Set door types, then wait about 10 seconds for other players. Mark the door the phone arrow points at as ghost. Mark a door safe only if you know it is.</div></div>
- ${advisor()}
- <button class="pri" data-a="next">Next room</button>
- <div class="row sp" style="margin-top:10px"><span class="mut">Look ahead <select data-a="depth">${[1,2,3].map(d=>`<option value="${d}"${(S.depth||1)===d?' selected':''}>${d} room${d>1?'s':''}</option>`).join('')}</select></span><button data-a="reset">New run</button></div>`;
-}
-newRoom();render();
-</script></body></html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Hauntlet 2 Advisor</title>
+    <style>
+      :root {
+        --bg: #f6f4fa;
+        --fg: #1c1a22;
+        --card: #fff;
+        --bd: #d9d4e3;
+        --ac: #6d28d9;
+        --mut: #6b6677;
+        --ok: #15803d;
+        --bad: #b91c1c;
+        --okbg: #e3f6e9;
+        --badbg: #fde4e4;
+        box-sizing: border-box;
+        padding-top: env(safe-area-inset-top, 0px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme='light']) {
+          --bg: #15131a;
+          --fg: #ece9f3;
+          --card: #211e29;
+          --bd: #3a3547;
+          --ac: #a78bfa;
+          --mut: #a29cb0;
+          --ok: #4ade80;
+          --bad: #f87171;
+          --okbg: #12301c;
+          --badbg: #3a1616;
+        }
+      }
+      :root[data-theme='dark'] {
+        --bg: #15131a;
+        --fg: #ece9f3;
+        --card: #211e29;
+        --bd: #3a3547;
+        --ac: #a78bfa;
+        --mut: #a29cb0;
+        --ok: #4ade80;
+        --bad: #f87171;
+        --okbg: #12301c;
+        --badbg: #3a1616;
+      }
+      html {
+        scroll-padding-top: env(safe-area-inset-top, 0px);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.4 system-ui,
+          -apple-system,
+          'Segoe UI',
+          Arial,
+          sans-serif;
+      }
+      #app {
+        max-width: 560px;
+        margin: 0 auto;
+        padding: 12px;
+        display: grid;
+        gap: 10px;
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-areas: 'top' 'doors' 'advice' 'next';
+      }
+      @media (min-width: 900px) {
+        #app {
+          max-width: 1000px;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+          grid-template-areas: 'top advice' 'doors advice' 'next advice';
+          align-items: start;
+        }
+        #advice {
+          position: sticky;
+          top: 12px;
+        }
+      }
+      #top {
+        grid-area: top;
+      }
+      #doorcard {
+        grid-area: doors;
+      }
+      #advice {
+        grid-area: advice;
+      }
+      #nextwrap {
+        grid-area: next;
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--bd);
+        border-radius: 12px;
+        padding: 12px;
+      }
+      h2 {
+        font-size: 12px;
+        margin: 0 0 8px;
+        color: var(--mut);
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        align-items: center;
+      }
+      .sp {
+        justify-content: space-between;
+      }
+      button,
+      select {
+        font: inherit;
+        color: var(--fg);
+        background: var(--card);
+        border: 1px solid var(--bd);
+        border-radius: 8px;
+        padding: 6px 12px;
+        min-height: 40px;
+        cursor: pointer;
+      }
+      button.on {
+        background: var(--ac);
+        color: #fff;
+        border-color: var(--ac);
+      }
+      button.g.on {
+        background: var(--bad);
+        border-color: var(--bad);
+        color: #fff;
+      }
+      button.s.on {
+        background: var(--ok);
+        border-color: var(--ok);
+        color: #06210f;
+      }
+      button.pri {
+        background: var(--ac);
+        color: #fff;
+        border-color: var(--ac);
+        font-weight: 600;
+        width: 100%;
+        min-height: 48px;
+        font-size: 16px;
+      }
+      .inv {
+        display: flex;
+        gap: 4px;
+        align-items: center;
+        border: 1px solid var(--bd);
+        border-radius: 10px;
+        padding: 2px 4px;
+      }
+      .inv button {
+        min-height: 32px;
+        padding: 2px 10px;
+      }
+      .big {
+        font-size: 20px;
+        font-weight: 700;
+        min-width: 28px;
+        text-align: center;
+      }
+      .rin {
+        width: 56px;
+        height: 40px;
+        font:
+          700 20px/1 system-ui,
+          sans-serif;
+        text-align: center;
+        color: var(--fg);
+        background: var(--card);
+        border: 1px solid var(--bd);
+        border-radius: 8px;
+        padding: 0;
+        outline: none;
+      }
+      .rin:focus {
+        border-color: var(--ac);
+        box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.35);
+      }
+      html,
+      body,
+      button,
+      select,
+      input {
+        touch-action: manipulation;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .mut {
+        color: var(--mut);
+        font-size: 13px;
+      }
+      .rec {
+        font-size: 18px;
+        font-weight: 700;
+        line-height: 1.3;
+      }
+      .boxes {
+        display: flex;
+        gap: 10px;
+        justify-content: center;
+        margin: 10px 0;
+      }
+      .dcell {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        flex: 1;
+        max-width: 100px;
+        min-width: 0;
+      }
+      .box {
+        width: 100%;
+        height: 84px;
+        font:
+          800 36px/1 system-ui,
+          sans-serif;
+        text-align: center;
+        text-transform: uppercase;
+        border: 2px solid var(--bd);
+        border-radius: 12px;
+        background: var(--card);
+        color: var(--fg);
+        padding: 0;
+        caret-color: transparent;
+        outline: none;
+      }
+      .box.filled {
+        border-color: var(--fg);
+      }
+      .box.act {
+        border-color: var(--ac);
+        box-shadow: 0 0 0 3px rgba(124, 58, 237, 0.35);
+      }
+      .box.ghost {
+        background: var(--badbg);
+        border-color: var(--bad);
+      }
+      .box.safe {
+        background: var(--okbg);
+        border-color: var(--ok);
+      }
+      .nm {
+        font-size: 12px;
+        color: var(--mut);
+        height: 16px;
+      }
+      .mini {
+        display: flex;
+        gap: 4px;
+      }
+      .mini button {
+        min-height: 32px;
+        padding: 2px 8px;
+        font-size: 12px;
+      }
+      .picker {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
+        gap: 6px;
+        margin-bottom: 8px;
+      }
+      .picker button {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 6px 4px;
+        min-height: 48px;
+      }
+      .picker b {
+        font-size: 20px;
+        line-height: 1.1;
+      }
+      .picker span {
+        font-size: 11px;
+        color: var(--mut);
+      }
+      .sm {
+        min-height: 34px;
+        padding: 2px 10px;
+        font-size: 13px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        font-size: 14px;
+      }
+      td,
+      th {
+        padding: 5px 6px;
+        border-bottom: 1px solid var(--bd);
+        text-align: left;
+      }
+      tr.best td {
+        font-weight: 700;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="card" id="top"></div>
+      <div class="card" id="doorcard"></div>
+      <div id="advice"></div>
+      <div id="nextwrap">
+        <button class="pri" data-a="next">Next round (Enter)</button>
+        <div class="row sp" style="margin-top: 8px">
+          <span class="mut">Odds fitted to your logged runs.</span
+          ><button class="sm" data-a="reset">New run</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      /* ===== Hauntlet 2 door advisor =====
+ Model fitted to your two logs (hauntlet2.csv + the full run):
+ - each room has T ghosts in total, set by the room number (1 early in each block, 2 later, always 3 in the final area as a 2+1 split),
+   placed on doors in proportion to a risk weight per door type, so a door can hold 2 ghosts (damage = ghosts behind it);
+ - shock doors always add 1 damage; golden doors never have ghosts and give +1 permanent heart;
+ - evidence (phone arrow, doors known safe) is applied exactly by enumerating ghost placements;
+ - the future is a dynamic program over every remaining room (not a short look-ahead): room, hearts, max hearts, heal potions, wands, phones,
+   1-room hearts and keys, with door item drops, keys being used up, the waiting-room pick (heal, wand or golden key) and golden doors included;
+   future rooms use every possible door-type combination, grouped into 8 equally likely kinds of room;
+   door drops cover keys, ghost potions, phones, wands, heal potions and golden keys; a bounce door sends you to a random other door (its items and golden doors included). */
+      const WT = {
+        '?': 1,
+        low: 1,
+        mod: 1.44,
+        high: 2.43,
+        key: 0.3,
+        web: 0.2,
+        nightmare: 1.65,
+        bounce: 1.14,
+        shock: 0.52,
+        golden: 0,
+      };
+      const PI = {
+        '?': 0.3,
+        low: 0.3,
+        mod: 0.5,
+        high: 0.5,
+        key: 0.22,
+        web: 0,
+        nightmare: 0.45,
+        bounce: 0.1,
+        shock: 0.5,
+        golden: 0,
+      }; // chance a door gives an item (small sample)
+      const FREQ = {
+        B1: { 'low': 0.481, 'mod': 0.309, 'key': 0.123, 'high': 0.086 },
+        BT: {
+          'shock': 0.059,
+          'key': 0.215,
+          'low': 0.194,
+          'mod': 0.215,
+          'high': 0.059,
+          'web': 0.145,
+          'nightmare': 0.091,
+          'bounce': 0.022,
+        },
+        BF: {
+          'web': 0.073,
+          'mod': 0.145,
+          'low': 0.127,
+          'high': 0.127,
+          'key': 0.346,
+          'nightmare': 0.109,
+          'shock': 0.036,
+          'bounce': 0.036,
+        },
+      }; // door-type mix by phase (your logs)
+      const GK = 0.14,
+        GHL = 0.02,
+        GG = 0.01,
+        PG0 = 0.02,
+        PG1 = 0.22,
+        NB = 8; // key drops per room; chance another player's golden key puts a golden door in a room (before / from door 28)
+      const GP = 0.1,
+        GH = 0.065,
+        GW = 0.03,
+        GI = GP + GH + GW + GHL + GG,
+        USE = 0.56; // per-room chance a door drops a ghost potion / phone / wand (from your full run); share of door items that are not keys
+      const PTM = [5.49, 1.489, 1.846, 3.897, 4.0],
+        ARROW = 0.55,
+        TOT = 45,
+        REW = 0.5;
+      const FACT = [1, 1, 2, 6, 24];
+      const sg = (x) => 1 / (1 + Math.exp(-x));
+      // total ghosts in a room follow a fixed schedule: 1 early in each block of 10, 2 later (from room 8, 16, 24, 32), always 3 from room 41
+      const S2 = 0.53,
+        U3 = 0.05; // chance two ghosts share one door (T=2); chance the final room is 1+1+1 instead of 2+1
+      function tpmf(room) {
+        const R = room >= 41 ? 3 : 1 + ((room % 10) + 2 * Math.floor(room / 10) >= 8 ? 1 : 0);
+        let p = [0, 0, 0, 0];
+        if (room === 1) p = [0.75, 0.25, 0, 0];
+        else {
+          p[R] = 0.93;
+          if (R > 0) p[R - 1] += 0.035;
+          if (R < 3) p[R + 1] += 0.035;
+        }
+        const s = p.reduce((x, y) => x + y, 0);
+        return p.map((x) => x / s);
+      }
+
+      const ixs = (h, a, b, c, d, e) => ((((h * 3 + a) * 3 + b) * 3 + c) * 3 + d) * 3 + e; // hearts, heal potions, wands, phones, 1-room hearts, keys (each item capped at 2)
+      const bandF = (r) => (r <= 9 ? FREQ.B1 : r <= 36 ? FREQ.BT : FREQ.BF);
+      let ROOMS = null;
+      const FACT_ = [1, 1, 2, 6, 24],
+        shiftP = (q) => [q[0] + q[1], q[2], q[3], 0];
+      // exact enumeration of every door-type combination for each future room, grouped into NB equally likely kinds of room
+      function buildRooms() {
+        ROOMS = [null];
+        const TYS = ['low', 'mod', 'high', 'key', 'web', 'nightmare', 'bounce', 'shock'],
+          memo = {};
+        const pm = (types, j, room) => {
+          const tk =
+              room === 1
+                ? 0
+                : room >= 41
+                  ? 3
+                  : 1 + ((room % 10) + 2 * Math.floor(room / 10) >= 8 ? 1 : 0),
+            key = types.join() + '|' + j + '|' + tk;
+          let v = memo[key];
+          if (!v) {
+            const P = post(types, j < 0 ? new Set() : new Set([j]), new Set(), room);
+            v = memo[key] = { D: dmgAll(types, P.m), rev: P.rev };
+          }
+          return v;
+        };
+        for (let r = 1; r <= TOT; r++) {
+          const room = r + Math.floor((r - 1) / 9),
+            f = bandF(r),
+            n = r >= 37 ? 4 : 3,
+            combos = [];
+          (function rec(st, cur) {
+            if (cur.length === n) {
+              combos.push(cur.slice());
+              return;
+            }
+            for (let i = st; i < TYS.length; i++) {
+              cur.push(TYS[i]);
+              rec(i, cur);
+              cur.pop();
+            }
+          })(0, []);
+          let tot = 0;
+          const rows = [];
+          for (const types of combos) {
+            const cnt = {};
+            types.forEach((t) => (cnt[t] = (cnt[t] || 0) + 1));
+            let pr = FACT_[n];
+            for (const t in cnt) pr *= Math.pow(f[t] || 0, cnt[t]) / FACT_[cnt[t]];
+            if (pr <= 0) continue;
+            const ex = (d) => d[1] + 2 * d[2] + 3 * d[3],
+              best = (ds, skip, nk) => {
+                let bi = -1,
+                  be = 9;
+                ds.forEach((d, i) => {
+                  if (i === skip || (nk && types[i] === 'key')) return;
+                  const e = ex(d);
+                  if (e < be) {
+                    be = e;
+                    bi = i;
+                  }
+                });
+                return bi;
+              };
+            const P0 = pm(types, -1, room),
+              D0 = P0.D,
+              bo = best(D0, -1, false);
+            let bn = best(D0, -1, true);
+            if (bn < 0) bn = bo;
+            const K0 = D0[bo],
+              N0 = D0[bn],
+              pK0 = types[bo] === 'key' && bn !== bo ? 1 : 0;
+            const K1 = [0, 0, 0, 0],
+              N1 = [0, 0, 0, 0];
+            let pK1 = 0,
+              w1 = 0;
+            for (let j = 0; j < n; j++) {
+              const rv = P0.rev[j];
+              if (rv <= 0) continue;
+              const D1 = pm(types, j, room).D,
+                b1 = best(D1, j, false);
+              let n1 = best(D1, j, true);
+              if (n1 < 0) n1 = b1;
+              for (let d = 0; d < 4; d++) {
+                K1[d] += rv * D1[b1][d];
+                N1[d] += rv * D1[n1][d];
+              }
+              pK1 += rv * (types[b1] === 'key' && n1 !== b1 ? 1 : 0);
+              w1 += rv;
+            }
+            const rest = Math.max(0, 1 - w1);
+            for (let d = 0; d < 4; d++) {
+              K1[d] += rest * K0[d];
+              N1[d] += rest * N0[d];
+            }
+            pK1 += rest * pK0;
+            rows.push({ pr, e: ex(K0), K0, N0, pK0, K1, N1, pK1 });
+            tot += pr;
+          }
+          rows.sort((x, y) => x.e - y.e);
+          const B = [];
+          let acc = 0,
+            bi = 1;
+          const z = () => ({
+            w: 0,
+            K0: [0, 0, 0, 0],
+            N0: [0, 0, 0, 0],
+            K1: [0, 0, 0, 0],
+            N1: [0, 0, 0, 0],
+            pK0: 0,
+            pK1: 0,
+          });
+          let cur = z();
+          const flush = () => {
+            if (cur.w > 0) {
+              const w = cur.w,
+                s = (v) => v.map((x) => x / w),
+                K0 = s(cur.K0),
+                N0 = s(cur.N0),
+                K1 = s(cur.K1),
+                N1 = s(cur.N1);
+              B.push({
+                K0,
+                N0,
+                K1,
+                N1,
+                K0s: shiftP(K0),
+                N0s: shiftP(N0),
+                K1s: shiftP(K1),
+                N1s: shiftP(N1),
+                pK0: cur.pK0 / w,
+                pK1: cur.pK1 / w,
+              });
+            }
+            cur = z();
+          };
+          for (const x of rows) {
+            const p = x.pr / tot;
+            cur.w += p;
+            for (let d = 0; d < 4; d++) {
+              cur.K0[d] += p * x.K0[d];
+              cur.N0[d] += p * x.N0[d];
+              cur.K1[d] += p * x.K1[d];
+              cur.N1[d] += p * x.N1[d];
+            }
+            cur.pK0 += p * x.pK0;
+            cur.pK1 += p * x.pK1;
+            acc += p;
+            if (acc >= bi / NB - 1e-9 && bi < NB) {
+              flush();
+              bi++;
+            }
+          }
+          flush();
+          ROOMS.push(B);
+        }
+      }
+      const DPC = [{}, {}, {}, {}, {}, {}],
+        LVL = 4; // LVL = how many later golden-key jumps the plan can see
+      // dynamic program over every remaining room. lvl 0 = no golden doors; lvl 1 = golden doors from other players' keys and the waiting-room golden key (jumping to the lvl-0 table with one more max heart)
+      function dpBuild(M, lvl) {
+        const C = DPC[lvl];
+        if (C[M]) return C[M];
+        if (!ROOMS) buildRooms();
+        const G = lvl > 0 && M < 10 ? dpBuild(M + 1, lvl - 1) : null,
+          SZ = (M + 1) * 243,
+          V = [];
+        const A = (r, h, a, b, p, g, k) => {
+          if (r >= TOT) return 1;
+          const Vn = V[r + 1];
+          if (r % 9 === 0 && r <= 36) {
+            let v = Math.max(
+              Vn[ixs(h, Math.min(2, a + 1), b, p, g, k)],
+              Vn[ixs(h, a, Math.min(2, b + 1), p, g, k)],
+            );
+            if (G) {
+              const gv = G.V[r + 1][ixs(Math.min(M + 1, h + 1), a, b, p, g, k)];
+              if (gv > v) v = gv;
+            }
+            return v;
+          }
+          return Vn[ixs(h, a, b, p, g, k)];
+        };
+        for (let r = TOT; r >= 1; r--) {
+          const MX = new Float64Array(SZ),
+            Bk = ROOMS[r],
+            pg = lvl > 0 ? (r >= 28 ? PG1 : PG0) : 0,
+            Vr = (V[r] = new Float64Array(SZ));
+          for (let h = 1; h <= M; h++)
+            for (let a = 0; a < 3; a++)
+              for (let b = 0; b < 3; b++)
+                for (let p = 0; p < 3; p++)
+                  for (let g = 0; g < 3; g++)
+                    for (let k = 0; k < 3; k++)
+                      MX[ixs(h, a, b, p, g, k)] =
+                        (1 - GI - GK) * A(r, h, a, b, p, g, k) +
+                        GP * A(r, h, a, b, p, Math.min(2, g + 1), k) +
+                        GH * A(r, h, a, b, Math.min(2, p + 1), g, k) +
+                        GW * A(r, h, a, Math.min(2, b + 1), p, g, k) +
+                        GK * A(r, h, a, b, p, g, Math.min(2, k + 1)) +
+                        GHL * A(r, h, Math.min(2, a + 1), b, p, g, k) +
+                        GG *
+                          (G
+                            ? G.A(r, Math.min(M + 1, h + 1), a, b, p, g, k)
+                            : A(r, h, a, b, p, g, k));
+          const ev = (q, h2, rest) => {
+            let v = 0;
+            if (q[0] > 0) v += q[0] * MX[h2 * 243 + rest];
+            if (h2 > 1 && q[1] > 0) v += q[1] * MX[(h2 - 1) * 243 + rest];
+            if (h2 > 2 && q[2] > 0) v += q[2] * MX[(h2 - 2) * 243 + rest];
+            if (h2 > 3 && q[3] > 0) v += q[3] * MX[(h2 - 3) * 243 + rest];
+            return v;
+          };
+          const rs = (a, b, p, g, k) => (((a * 3 + b) * 3 + p) * 3 + g) * 3 + k;
+          const play = (h, a, b, p, g, k, x, arrow) => {
+            let best = 0;
+            for (let uh = 0; uh <= (a > 0 && h < M ? 1 : 0); uh++) {
+              const h2 = uh ? M : h,
+                a2 = a - uh;
+              for (let im = 0; im < 3; im++) {
+                if (im === 1 && !b) continue;
+                if (im === 2 && !g) continue;
+                const b2 = b - (im === 1),
+                  g2 = g - (im === 2);
+                if (im === 1) {
+                  const v = MX[h2 * 243 + rs(a2, b2, p, g2, k)];
+                  if (v > best) best = v;
+                  continue;
+                }
+                for (let up = 0; up <= (p > 0 && !im && !arrow ? 1 : 0); up++) {
+                  const p2 = p - up,
+                    r0 = rs(a2, b2, p2, g2, k),
+                    rk = k > 0 ? rs(a2, b2, p2, g2, k - 1) : 0;
+                  const qN = im ? (up ? x.N1s : x.N0s) : up ? x.N1 : x.N0,
+                    qK = im ? (up ? x.K1s : x.K0s) : up ? x.K1 : x.K0,
+                    pk = up ? x.pK1 : x.pK0;
+                  let val = ev(qN, h2, r0);
+                  if (k > 0 && pk > 0) {
+                    const vK = ev(qK, h2, rk);
+                    val = (1 - pk) * val + pk * Math.max(val, vK);
+                  }
+                  if (val > best) best = val;
+                }
+              }
+            }
+            return best;
+          };
+          for (let h = 1; h <= M; h++)
+            for (let a = 0; a < 3; a++)
+              for (let b = 0; b < 3; b++)
+                for (let p = 0; p < 3; p++)
+                  for (let g = 0; g < 3; g++)
+                    for (let k = 0; k < 3; k++) {
+                      let tot = 0;
+                      for (let q = 0; q < Bk.length; q++) {
+                        const x = Bk[q];
+                        const xa = {
+                          N0: x.N1,
+                          K0: x.K1,
+                          N0s: x.N1s,
+                          K0s: x.K1s,
+                          pK0: x.pK1,
+                          N1: x.N1,
+                          K1: x.K1,
+                          N1s: x.N1s,
+                          K1s: x.K1s,
+                          pK1: x.pK1,
+                        };
+                        tot +=
+                          ARROW * play(h, a, b, p, g, k, x.arrowX || (x.arrowX = xa), true) +
+                          (1 - ARROW) * play(h, a, b, p, g, k, x, false);
+                      }
+                      let v = tot / Bk.length;
+                      if (G && pg > 0)
+                        v = (1 - pg) * v + pg * G.A(r, Math.min(M + 1, h + 1), a, b, p, g, k);
+                      Vr[ixs(h, a, b, p, g, k)] = v;
+                    }
+        }
+        return (C[M] = { V, A, M });
+      }
+      function allocPrior(p, T) {
+        const n = p.length,
+          o = [],
+          z = () => Array(n).fill(0),
+          d = (x) => (x > 1e-12 ? x : 1e-12);
+        if (T === 0) {
+          o.push([z(), 1]);
+          return o;
+        }
+        if (T === 1) {
+          for (let i = 0; i < n; i++) {
+            const v = z();
+            v[i] = 1;
+            o.push([v, p[i]]);
+          }
+          return o;
+        }
+        if (T === 2) {
+          for (let i = 0; i < n; i++) {
+            const v = z();
+            v[i] = 2;
+            o.push([v, S2 * p[i]]);
+          }
+          for (let i = 0; i < n; i++)
+            for (let j = i + 1; j < n; j++) {
+              const v = z();
+              v[i] = 1;
+              v[j] = 1;
+              o.push([v, (1 - S2) * ((p[i] * p[j]) / d(1 - p[i]) + (p[j] * p[i]) / d(1 - p[j]))]);
+            }
+          return o;
+        }
+        for (let a = 0; a < n; a++)
+          for (let b = 0; b < n; b++) {
+            if (a === b) continue;
+            const v = z();
+            v[a] = 2;
+            v[b] = 1;
+            o.push([v, ((1 - U3) * p[a] * p[b]) / d(1 - p[a])]);
+          }
+        for (let i = 0; i < n; i++)
+          for (let j = i + 1; j < n; j++)
+            for (let k = j + 1; k < n; k++) {
+              const v = z();
+              v[i] = v[j] = v[k] = 1;
+              let q = 0;
+              [
+                [i, j, k],
+                [i, k, j],
+                [j, i, k],
+                [j, k, i],
+                [k, i, j],
+                [k, j, i],
+              ].forEach(([x, y, w]) => {
+                q += (((p[x] * p[y]) / d(1 - p[x])) * p[w]) / d(1 - p[x] - p[y]);
+              });
+              o.push([v, U3 * q]);
+            }
+        return o;
+      }
+      function post(types, G, Z, room) {
+        const n = types.length,
+          w = types.map((t) => (WT[t] === undefined ? 1 : WT[t])),
+          W = w.reduce((x, y) => x + y, 0),
+          p = w.map((x) => x / W),
+          pt = tpmf(room),
+          m = Array.from({ length: n }, () => [0, 0, 0, 0, 0]),
+          rev = Array(n).fill(0);
+        let Zs = 0,
+          p0 = 0;
+        for (let T = 0; T <= 3; T++)
+          for (const [c, q] of allocPrior(p, T)) {
+            let ok = true;
+            for (let i = 0; i < n; i++) {
+              if (G.has(i) && c[i] < 1) ok = false;
+              if (Z.has(i) && c[i] > 0) ok = false;
+            }
+            if (!ok) continue;
+            const pr = pt[T] * q;
+            if (pr <= 0) continue;
+            Zs += pr;
+            const occ = c.filter((x) => x > 0).length;
+            if (!occ) p0 += pr;
+            for (let i = 0; i < n; i++) {
+              m[i][Math.min(4, c[i])] += pr;
+              if (c[i] > 0) rev[i] += pr / occ;
+            }
+          }
+        if (Zs <= 0)
+          return {
+            m: types.map((_, i) => [G.has(i) ? 0 : 1, G.has(i) ? 1 : 0, 0, 0, 0]),
+            rev: types.map(() => 0),
+            p0: 0,
+          };
+        return { m: m.map((r) => r.map((x) => x / Zs)), rev: rev.map((x) => x / Zs), p0: p0 / Zs };
+      }
+      function dmgPmf(t, row) {
+        const r = [0, 0, 0, 0];
+        for (let c = 0; c < 5; c++) r[Math.min(3, c + (t === 'shock' ? 1 : 0))] += row[c];
+        return r;
+      }
+      // a bounce door sends you to a random other door in the room, so its damage is the average of the others (repeated for chains of bounce doors)
+      function dmgAll(types, m) {
+        const n = types.length,
+          D = m.map((r, i) => dmgPmf(types[i], r)),
+          bs = [];
+        types.forEach((t, i) => {
+          if (t === 'bounce') bs.push(i);
+        });
+        if (!bs.length || n < 2) return D;
+        for (const i of bs) D[i] = [1, 0, 0, 0];
+        for (let it = 0; it < 4; it++)
+          for (const i of bs) {
+            const o = [0, 0, 0, 0];
+            let c = 0;
+            for (let j = 0; j < n; j++) {
+              if (j === i || (types[j] === 'bounce' && it === 0)) continue;
+              for (let d = 0; d < 4; d++) o[d] += D[j][d];
+              c++;
+            }
+            if (c) D[i] = o.map((x) => x / c);
+          }
+        return D;
+      }
+
+      // best way to play this room given evidence; al={h:may drink heal, i:may use wand / 1-room heart}
+      function evalRoom(s, types, G, Z, al) {
+        const pr = post(types, G, Z, s.room),
+          DM = dmgAll(types, pr.m),
+          n = types.length,
+          D = dpBuild(s.M, LVL),
+          A = D.A,
+          G1 = s.M < 10 ? dpBuild(s.M + 1, LVL - 1) : null,
+          acts = [],
+          L = [],
+          lock = [],
+          out = [],
+          lo = F.locksOff || al.lo,
+          kk = al.lo && !F.locksOff ? 1 : 0;
+        for (let uh = 0; uh <= (al.h && s.nh > 0 && s.h < s.M ? 1 : 0); uh++)
+          for (let im = 0; im <= (al.i ? 2 : 0); im++) {
+            if (im === 1 && !s.nw) continue;
+            if (im === 2 && !s.ng) continue;
+            acts.push([uh, im]);
+          }
+        for (let i = 0; i < n; i++) {
+          const t = types[i];
+          lock[i] = (t === 'key' && !lo) || (t === 'golden' && !s.gk && !F.goldKey);
+          if (t === 'golden') {
+            const e = G1
+              ? G1.A(s.r, Math.min(s.M + 1, s.h + 1), s.nh, s.nw, s.np, s.ng, s.nk - kk)
+              : A(s.r, s.h, s.nh, s.nw, s.np, s.ng, s.nk - kk);
+            L[i] = acts.map(([uh, im]) => ({ uh, im, ev: e }));
+            continue;
+          }
+          if (t === 'bounce') {
+            L[i] = null;
+            continue;
+          }
+          const dm = DM[i];
+          L[i] = acts.map(([uh, im]) => {
+            const h2 = uh ? s.M : s.h;
+            let a = s.nh - uh,
+              b = s.nw - (im === 1),
+              g = s.ng - (im === 2),
+              p = s.np,
+              k = s.nk - kk;
+            if (t === 'web') {
+              a = 0;
+              b = 0;
+              g = 0;
+              p = 0;
+              k = 0;
+            }
+            let q = dm;
+            if (im === 1) q = t === 'shock' ? [0, 1, 0, 0] : [1, 0, 0, 0];
+            else if (im === 2) q = [dm[0] + dm[1], dm[2], dm[3], 0];
+            let ev = 0;
+            for (let d = 0; d < 4; d++) {
+              if (q[d] <= 0 || h2 - d <= 0) continue;
+              const hh = h2 - d,
+                base = A(s.r, hh, a, b, p, g, k);
+              let v = base;
+              if (PI[t]) {
+                const gain =
+                  0.274 * A(s.r, hh, a, b, p, Math.min(2, g + 1), k) +
+                  0.178 * A(s.r, hh, a, b, Math.min(2, p + 1), g, k) +
+                  0.082 * A(s.r, hh, a, Math.min(2, b + 1), p, g, k) +
+                  0.384 * A(s.r, hh, a, b, p, g, Math.min(2, k + 1)) +
+                  0.055 * A(s.r, hh, Math.min(2, a + 1), b, p, g, k) +
+                  0.027 * (G1 ? G1.A(s.r, Math.min(s.M + 1, hh + 1), a, b, p, g, k) : base) -
+                  base;
+                v += REW * PI[t] * gain;
+              }
+              ev += q[d] * v;
+            }
+            return { uh, im, ev };
+          });
+        }
+        // a bounce door lands you on a random other door: average what those doors would give you, items and golden doors included
+        for (let pass = 0; pass < 2; pass++)
+          for (let i = 0; i < n; i++) {
+            if (types[i] !== 'bounce') continue;
+            const js = [];
+            for (let j = 0; j < n; j++) if (j !== i && L[j] && !lock[j]) js.push(j);
+            L[i] = acts.map((ac, k) => ({
+              uh: ac[0],
+              im: ac[1],
+              ev: js.length ? js.reduce((x, j) => x + L[j][k].ev, 0) / js.length : 0,
+            }));
+          }
+        for (let i = 0; i < n; i++) {
+          const t = types[i],
+            dm = DM[i];
+          if (lock[i]) {
+            out.push({ i, t, hit: 0, ad: 0, p2: 0, locked: true, ev: -1 });
+            continue;
+          }
+          let best = null;
+          for (const c of L[i]) if (!best || c.ev > best.ev) best = c;
+          out.push({
+            i,
+            t,
+            hit: 1 - dm[0],
+            ad: dm[1] + 2 * dm[2] + 3 * dm[3],
+            p2: dm[2] + dm[3],
+            ev: best.ev,
+            uh: best.uh,
+            im: best.im,
+          });
+        }
+        out.sort((x, y) => y.ev - x.ev);
+        return { out, pr };
+      }
+      function advise() {
+        const n = F.n,
+          types = F.doors.slice(0, n).map((d) => d.t),
+          G = new Set(),
+          Z = new Set();
+        F.doors.slice(0, n).forEach((d, i) => {
+          if (d.a || d.b === 'ghost') G.add(i);
+          if (d.b === 'safe') Z.add(i);
+        });
+        const M = Math.max(1, S.maxH),
+          s = {
+            M,
+            h: Math.max(1, Math.min(M, S.hearts)),
+            nh: Math.min(2, S.inv.heart_potion),
+            nw: Math.min(2, S.inv.wand),
+            np: Math.min(2, S.inv.phone),
+            ng: Math.min(2, S.inv.ghost_potion),
+            nk: Math.min(2, S.inv.key),
+            gk: S.inv.golden_key > 0,
+            r: Math.min(S.room, TOT),
+            room: S.round,
+          };
+        const th = s.h >= 3 ? 0.03 : s.h === 2 ? 0.015 : 0.005,
+          none = evalRoom(s, types, G, Z, { h: 0, i: 0 }),
+          all = evalRoom(s, types, G, Z, { h: 1, i: 1 });
+        const a0 = none.out.find((x) => !x.locked),
+          a1 = all.out.find((x) => !x.locked);
+        let plan = { kind: 'none', gain: 0 },
+          table = none.out;
+        if (a0 && a1 && a1.ev - a0.ev >= th) {
+          plan = { kind: 'use', gain: a1.ev - a0.ev, uh: a1.uh, im: a1.im };
+          table = all.out;
+        }
+        const base = a1 ? a1.ev : 0;
+        if (s.np > 0 && !G.size && a0) {
+          // phone reveals a random ghost door: average the best follow-up over what it could show
+          const pr = none.pr,
+            s2 = { ...s, np: s.np - 1 };
+          let ev = 0,
+            pw = 0;
+          for (let j = 0; j < n; j++) {
+            if (pr.rev[j] <= 0) continue;
+            const r = evalRoom(s2, types, new Set([j]), Z, { h: 1, i: 1 }).out.find(
+              (x) => !x.locked,
+            );
+            ev += pr.rev[j] * (r ? r.ev : 0);
+            pw += pr.rev[j];
+          }
+          const e0 = evalRoom(s2, types, G, Z, { h: 1, i: 1 }).out.find((x) => !x.locked);
+          ev += Math.max(0, 1 - pw) * (e0 ? e0.ev : 0);
+          if (ev - base >= th) plan = { kind: 'phone', gain: ev - base, after: plan };
+        }
+
+        if (s.nk > 0 && !F.locksOff && types.includes('key')) {
+          // spend one of your keys to remove the locks for everyone in the room
+          const e = evalRoom(s, types, G, Z, { h: 1, i: 1, lo: true }),
+            b = e.out.find((x) => !x.locked);
+          if (b && b.ev - base >= th && b.ev - base > (plan.kind === 'none' ? 0 : plan.gain)) {
+            plan = { kind: 'key', gain: b.ev - base, uh: b.uh, im: b.im };
+            table = e.out;
+          }
+        }
+        return { out: table, plan, s };
+      }
+      // waiting room: value of each pick, best first (the golden key is worth a permanent +1 max heart)
+      function wrAdvice() {
+        const M = Math.max(1, S.maxH),
+          D = dpBuild(M, LVL),
+          r = di(S.round),
+          h = Math.max(1, Math.min(M, S.hearts)),
+          nh = Math.min(2, S.inv.heart_potion),
+          nw = Math.min(2, S.inv.wand),
+          np = Math.min(2, S.inv.phone),
+          ng = Math.min(2, S.inv.ghost_potion),
+          nk = Math.min(2, S.inv.key),
+          Vn = D.V[r + 1];
+        const o = [
+          ['heal potion', Vn[ixs(h, Math.min(2, nh + 1), nw, np, ng, nk)]],
+          ['wand', Vn[ixs(h, nh, Math.min(2, nw + 1), np, ng, nk)]],
+        ];
+        if (M < 10)
+          o.push([
+            'golden key',
+            dpBuild(M + 1, LVL - 1).V[r + 1][ixs(Math.min(M + 1, h + 1), nh, nw, np, ng, nk)],
+          ]);
+        return o.sort((x, y) => y[1] - x[1]);
+      }
+      const LET = {
+        low: 'L',
+        mod: 'M',
+        high: 'H',
+        key: 'K',
+        web: 'W',
+        nightmare: 'N',
+        bounce: 'B',
+        shock: 'E',
+        golden: 'G',
+        '?': '',
+      };
+      const NAME = {
+        l: 'low',
+        m: 'mod',
+        h: 'high',
+        k: 'key',
+        w: 'web',
+        n: 'nightmare',
+        b: 'bounce',
+        e: 'shock',
+        g: 'golden',
+      };
+      const ORDER = ['l', 'm', 'h', 'k', 'w', 'n', 'b', 'e', 'g'];
+      const ITEMS = [
+        ['heart_potion', 'heal potion', 2],
+        ['wand', 'wand', 2],
+        ['phone', 'phone', 3],
+        ['ghost_potion', '1-room heart', 2],
+        ['key', 'key', 3],
+        ['golden_key', 'golden key', 1],
+      ];
+      const $ = (id) => document.getElementById(id);
+      const di = (r) => r - Math.min(4, Math.floor(r / 10)),
+        isWR = (r) => r === 10 || r === 20 || r === 30 || r === 40,
+        isEnd = (r) => r >= 50;
+      const coarse = !!(window.matchMedia && matchMedia('(pointer:coarse)').matches);
+      function load() {
+        try {
+          const s = JSON.parse(localStorage.getItem('h2adv3'));
+          return s && s.inv && s.round ? s : null;
+        } catch (e) {
+          return null;
+        }
+      }
+      function persist() {
+        try {
+          localStorage.setItem(
+            'h2adv3',
+            JSON.stringify({
+              round: S.round,
+              hearts: S.hearts,
+              maxH: S.maxH,
+              inv: S.inv,
+              kb: S.kb,
+            }),
+          );
+        } catch (e) {}
+      }
+      const fresh = () => ({
+        round: 1,
+        hearts: 3,
+        maxH: 3,
+        kb: !coarse,
+        inv: { heart_potion: 0, wand: 0, phone: 0, ghost_potion: 0, key: 0, golden_key: 0 },
+      });
+      var S = load() || fresh(),
+        F;
+      S.inv = Object.assign(fresh().inv, S.inv);
+      if (S.kb === undefined) S.kb = !coarse;
+      S.maxH = Math.max(1, Math.min(10, S.maxH || 3));
+      S.hearts = Math.max(1, Math.min(S.maxH, S.hearts || 1));
+      const sync = () => {
+        S.room = di(S.round);
+      };
+      function newRoom() {
+        sync();
+        F = {
+          n: S.round >= 40 ? 4 : 3,
+          doors: [0, 1, 2, 3].map(() => ({ t: '?', b: '?', a: false })),
+          locksOff: false,
+          goldKey: false,
+          active: 0,
+        };
+      }
+      const pct = (x) => Math.round(x * 100) + '%',
+        pp = (x) => (x * 100).toFixed(1) + '%';
+      const box = (i) => document.querySelector('.box[data-i="' + i + '"]');
+      function ch2t(c) {
+        c = (c || '').toLowerCase();
+        if (NAME[c]) return NAME[c];
+        return c === ' ' || c === '?' || c === '-' || c === 'x' || c === '.' ? '?' : null;
+      }
+      function refreshDoors() {
+        for (let i = 0; i < F.n; i++) {
+          const b = box(i);
+          if (!b) continue;
+          const d = F.doors[i];
+          b.value = LET[d.t];
+          b.className =
+            'box' +
+            (d.t !== '?' ? ' filled' : '') +
+            (d.a ? ' ghost' : '') +
+            (d.b === 'safe' ? ' safe' : '') +
+            (F.active === i ? ' act' : '');
+          const c = b.parentNode;
+          c.querySelector('.nm').textContent = d.a
+            ? 'ghost'
+            : d.b === 'safe'
+              ? 'safe'
+              : d.t === '?'
+                ? ''
+                : d.t;
+          const bs = c.querySelectorAll('.mini button');
+          bs[0].className = d.a ? 'g on' : '';
+          bs[1].className = d.b === 'safe' ? 's on' : '';
+        }
+      }
+      function focusBox(i) {
+        F.active = i;
+        refreshDoors();
+        const b = box(i);
+        if (b) {
+          b.focus();
+          try {
+            b.select();
+          } catch (e) {}
+        }
+      }
+      function setDoor(i, t) {
+        F.doors[i].t = t;
+        refreshDoors();
+        renderAdvice();
+      }
+      function flag(i, k) {
+        const d = F.doors[i];
+        if (k === 'g') {
+          d.a = !d.a;
+          if (d.a) d.b = '?';
+        } else {
+          d.b = d.b === 'safe' ? '?' : 'safe';
+          if (d.b === 'safe') d.a = false;
+        }
+        refreshDoors();
+        renderAdvice();
+        const b = box(i);
+        if (b) {
+          b.focus();
+          try {
+            b.select();
+          } catch (e) {}
+        }
+      }
+      function renderTop() {
+        const M = S.maxH;
+        $('top').innerHTML =
+          `<div class="row sp"><span class="row">Round <button data-a="round" data-v="-1">−</button><input class="rin" id="rin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="2" autocomplete="off" value="${S.round}" aria-label="Round number"><button data-a="round" data-v="1">+</button><span class="mut">/ 50</span></span>
+ <span class="row">Hearts ${Array.from({ length: M }, (_, i) => i + 1)
+   .map(
+     (h) =>
+       `<button data-a="hearts" data-v="${h}" class="${S.hearts === h ? 'on' : ''}">${h}</button>`,
+   )
+   .join('')}</span></div>
+ <div class="row" style="margin-top:8px"><span class="mut">Max hearts</span><button class="sm" data-a="maxh" data-v="-1">−</button><b>${M}</b><button class="sm" data-a="maxh" data-v="1">+</button><button class="sm" data-a="gold">+1 golden door</button></div>
+ <div class="row" style="margin-top:10px">${ITEMS.map(([k, l]) => `<span class="inv">${l} <button data-a="inv" data-v="${k}|-1">−</button><b>${S.inv[k]}</b><button data-a="inv" data-v="${k}|1">+</button></span>`).join('')}</div>`;
+      }
+      function renderDoors() {
+        const c = $('doorcard');
+        if (isEnd(S.round)) {
+          c.innerHTML =
+            '<h2>Room 50</h2><div class="mut">This is the end of the game. Nothing to enter. Tap New run when you start again.</div>';
+          return;
+        }
+        if (isWR(S.round)) {
+          c.innerHTML =
+            '<h2>Waiting room</h2><div class="mut">No doors this round. Pick your item (see advice), update your items above, then continue.</div>';
+          return;
+        }
+        let b = '';
+        for (let i = 0; i < F.n; i++)
+          b += `<div class="dcell"><input class="box" data-i="${i}" autocomplete="off" autocapitalize="characters" autocorrect="off" spellcheck="false" inputmode="${S.kb ? 'text' : 'none'}" aria-label="Door ${i + 1} type"><div class="nm"></div><div class="mini nofocus"><button data-a="ghost" data-i="${i}">Ghost</button><button data-a="safe" data-i="${i}">Safe</button></div></div>`;
+        c.innerHTML = `<div class="row sp"><h2 style="margin:0">Doors</h2><span class="row"><button class="sm nofocus ${S.kb ? 'on' : ''}" data-a="kb">Keyboard</button><select class="sm" data-a="n" aria-label="Number of doors"><option value="3"${F.n === 3 ? ' selected' : ''}>3 doors</option><option value="4"${F.n === 4 ? ' selected' : ''}>4 doors</option></select></span></div>
+ <div class="boxes">${b}</div>
+ <div class="picker nofocus">${ORDER.map((k) => `<button data-a="pick" data-v="${k}"><b>${k.toUpperCase()}</b><span>${NAME[k]}</span></button>`).join('')}<button data-a="pick" data-v="?"><b>?</b><span>clear</span></button></div>
+ <div class="row sp"><button class="sm ${F.locksOff ? 'on' : ''}" data-a="tog" data-v="locksOff">Locks removed</button><button class="sm ${F.goldKey ? 'on' : ''}" data-a="tog" data-v="goldKey">Golden key available</button></div>
+ <div class="mut" style="margin-top:8px">Type the letters and they fill left to right (L low, M mod, H high, K key, W web, N nightmare, B bounce, E shock, G golden; space skips). Tap a box or letter to change one. A / S toggle ghost / safe on the active door. Enter = next round.</div>`;
+        refreshDoors();
+      }
+      let calcTimer = null;
+      function renderAdvice() {
+        if (isEnd(S.round)) {
+          $('advice').innerHTML =
+            '<div class="card"><h2>Advice</h2><div class="rec">You made it to room 50. The run is complete.</div></div>';
+          return;
+        }
+        if (!DPC[LVL][S.maxH]) {
+          $('advice').innerHTML =
+            '<div class="card"><h2>Advice</h2><div class="mut">Calculating the odds...</div></div>';
+          clearTimeout(calcTimer);
+          calcTimer = setTimeout(() => {
+            dpBuild(S.maxH, LVL);
+            renderAdvice();
+          }, 30);
+          return;
+        }
+        if (isWR(S.round)) {
+          const w = wrAdvice(),
+            top = w[0];
+          $('advice').innerHTML =
+            `<div class="card"><h2>Waiting room</h2><div class="rec">Take the ${top[0]}.</div><div class="mut" style="margin-top:6px">Estimated clear chance: ${w.map((x) => x[0] + ' ' + pct(x[1])).join(', ')}.${top[0] === 'golden key' ? ' The golden key makes a golden door appear for a permanent +1 max heart. Take that door as soon as it shows.' : ''}${S.hearts === S.maxH && top[0] === 'heal potion' ? ' You are at full hearts, so if the heal applies instantly take the next best pick.' : ''}</div></div>`;
+          return;
+        }
+        if (F.doors.slice(0, F.n).every((d) => d.t === '?')) {
+          $('advice').innerHTML =
+            '<div class="card"><h2>Advice</h2><div class="rec">Enter the door types to get a recommendation.</div></div>';
+          return;
+        }
+        const a = advise(),
+          p = a.plan,
+          ok = a.out.filter((x) => !x.locked),
+          t = ok[0],
+          nm = (x) => (x.t === '?' ? 'unknown type' : x.t);
+        const held = S.inv.heart_potion + S.inv.wand + S.inv.phone + S.inv.ghost_potion;
+        const risk = (x) =>
+          `${pct(x.hit)} chance of a hit` + (x.p2 > 0.12 ? ' (could cost 2 hearts)' : '');
+        let rec,
+          sub = '';
+        if (!ok.length)
+          rec = 'Every door is locked. You need a key, or wait to see if someone uses one.';
+        else if (t.t === 'golden' && p.kind !== 'phone') {
+          rec = `Open the golden door (Door ${t.i + 1}): +1 permanent heart.`;
+          sub = 'After you save it, tap "+1 golden door" at the top.';
+        } else if (p.kind === 'key') {
+          rec = `Use one of your keys to remove the locks (then tap Locks removed and take a key off your items), then open Door ${t.i + 1} (${nm(t)}): ${risk(t)}.`;
+          sub = `Worth about +${pp(p.gain)} run-clear chance.`;
+        } else if (p.kind === 'phone') {
+          rec = `Use your phone now, then tap Ghost on the door it points at and I will re-rank (about +${pp(p.gain)} run-clear chance).`;
+          sub = `Without it: Door ${t.i + 1} (${nm(t)}), ${risk(t)}.`;
+        } else if (p.kind === 'use') {
+          const st = [];
+          if (p.uh) st.push('drink your heal potion');
+          if (p.im === 1) st.push('use your wand (clears every ghost)');
+          if (p.im === 2) st.push('drink your 1-room heart (absorbs one hit)');
+          const f = st.join(', then ');
+          rec = f.charAt(0).toUpperCase() + f.slice(1) + `. Then open Door ${t.i + 1} (${nm(t)}).`;
+          sub = `Worth about +${pp(p.gain)} run-clear chance.`;
+        } else {
+          rec = `Open Door ${t.i + 1} (${nm(t)}): ${risk(t)}.`;
+          if (held) sub = 'Keep your items for now. Spending them here would not pay off.';
+        }
+        if (ok.length && t.t === 'web' && held + S.inv.key)
+          sub = (sub ? sub + ' ' : '') + 'Careful: web doors steal all your items, keys included.';
+        {
+          const sf = ok
+            .filter((x) => x.t !== 'golden')
+            .reduce((m, x) => (!m || x.hit < m.hit ? x : m), null);
+          if (sf && t.t !== 'golden' && sf.i !== t.i && t.hit - sf.hit > 0.005)
+            sub =
+              (sub ? sub + ' ' : '') +
+              `Door ${sf.i + 1} (${nm(sf)}) is safer (${pct(sf.hit)} hit chance) but Door ${t.i + 1} is picked because it drops items more often and the extra hit risk costs less than that is worth (${pp(t.ev - sf.ev)} run-clear difference).`;
+        }
+        if (S.inv.golden_key > 0 && ok.length && t.t !== 'golden')
+          sub =
+            (sub ? sub + ' ' : '') + 'You hold a golden key: take the golden door if one shows up.';
+        if (ok.length && t.t === 'shock')
+          sub = (sub ? sub + ' ' : '') + 'Shock doors always cost 1 heart.';
+        if (a.out.some((x) => x.t === 'golden' && x.locked))
+          sub =
+            (sub ? sub + ' ' : '') +
+            'The golden door needs a golden key: tap "Golden key available" if you or someone has one.';
+        const eff = (x) =>
+          x.t === 'golden'
+            ? '+1 heart'
+            : p.kind === 'use' && p.im === 1
+              ? x.t === 'shock'
+                ? '100%'
+                : '0%'
+              : p.kind === 'use' && p.im === 2
+                ? pct(x.p2)
+                : pct(x.hit);
+        const rows = a.out
+          .map(
+            (x, k) =>
+              `<tr${k === 0 && !x.locked ? ' class="best"' : ''}><td>Door ${x.i + 1} · ${nm(x)}</td><td>${x.locked ? 'locked' : eff(x)}</td><td>${x.locked ? '-' : pp(x.ev)}</td></tr>`,
+          )
+          .join('');
+        $('advice').innerHTML =
+          `<div class="card"><h2>Advice</h2><div class="rec">${rec}</div>${sub ? `<div class="mut" style="margin-top:6px">${sub}</div>` : ''}<table style="margin-top:10px"><tr><th>Door</th><th>Hit</th><th>Run clears</th></tr>${rows}</table></div>`;
+      }
+      function render(focus) {
+        renderTop();
+        renderDoors();
+        renderAdvice();
+        if (focus !== false && !isWR(S.round) && !isEnd(S.round)) focusBox(0);
+      }
+      function act(a, v, i) {
+        switch (a) {
+          case 'round':
+            S.round = Math.max(1, Math.min(50, S.round + +v));
+            newRoom();
+            persist();
+            render();
+            return;
+          case 'next':
+            S.round = Math.min(50, S.round + 1);
+            newRoom();
+            persist();
+            render();
+            return;
+          case 'reset':
+            S = fresh();
+            newRoom();
+            persist();
+            render();
+            return;
+          case 'hearts':
+            S.hearts = Math.min(S.maxH, +v);
+            break;
+          case 'maxh':
+            S.maxH = Math.max(1, Math.min(10, S.maxH + +v));
+            S.hearts = Math.min(S.hearts, S.maxH);
+            persist();
+            renderTop();
+            renderAdvice();
+            return;
+          case 'gold':
+            S.maxH = Math.min(10, S.maxH + 1);
+            S.hearts = Math.min(S.maxH, S.hearts + 1);
+            persist();
+            renderTop();
+            renderAdvice();
+            return;
+          case 'inv': {
+            const [k, d] = v.split('|');
+            const mx = ITEMS.find((x) => x[0] === k)[2];
+            S.inv[k] = Math.max(0, Math.min(mx, S.inv[k] + +d));
+            break;
+          }
+          case 'n':
+            F.n = +v;
+            if (F.active >= F.n) F.active = 0;
+            persist();
+            renderDoors();
+            renderAdvice();
+            return;
+          case 'kb':
+            S.kb = !S.kb;
+            persist();
+            renderDoors();
+            return;
+          case 'tog':
+            F[v] = !F[v];
+            renderDoors();
+            renderAdvice();
+            return;
+          case 'ghost':
+            flag(i, 'g');
+            return;
+          case 'safe':
+            flag(i, 's');
+            return;
+          case 'pick': {
+            const t = ch2t(v);
+            if (t === null) return;
+            const k = F.active;
+            setDoor(k, t);
+            focusBox(Math.min(k + 1, F.n - 1));
+            return;
+          }
+        }
+        persist();
+        renderTop();
+        renderAdvice();
+      }
+      document.addEventListener('click', (e) => {
+        const b = e.target.closest('button');
+        if (!b || !b.dataset.a) return;
+        act(b.dataset.a, b.dataset.v, +b.dataset.i);
+      });
+      document.addEventListener('change', (e) => {
+        const t = e.target;
+        if (t.tagName === 'SELECT' && t.dataset.a) act(t.dataset.a, t.value);
+      });
+      document.addEventListener('mousedown', (e) => {
+        if (e.target.closest('.nofocus')) e.preventDefault();
+      });
+      document.addEventListener('focusin', (e) => {
+        const t = e.target;
+        if (t.classList && t.classList.contains('box')) {
+          F.active = +t.dataset.i;
+          refreshDoors();
+          try {
+            t.select();
+          } catch (x) {}
+        }
+      });
+      document.addEventListener('input', (e) => {
+        const t = e.target;
+        if (!t.classList || !t.classList.contains('box')) return;
+        const i = +t.dataset.i,
+          v = t.value,
+          c = v.slice(-1).toLowerCase();
+        if (!v) {
+          if (F.doors[i].t !== '?') setDoor(i, '?');
+          else refreshDoors();
+          return;
+        }
+        if (c === 'a' || c === 's') {
+          flag(i, c === 'a' ? 'g' : 's');
+          return;
+        }
+        const ty = ch2t(c);
+        if (ty === null) {
+          refreshDoors();
+          return;
+        }
+        setDoor(i, ty);
+        focusBox(Math.min(i + 1, F.n - 1));
+      });
+      document.addEventListener('keydown', (e) => {
+        const t = e.target,
+          isBox = t.classList && t.classList.contains('box');
+        if (e.key === 'Enter' && (isBox || t === document.body)) {
+          e.preventDefault();
+          act('next');
+          return;
+        }
+        if (!isBox) return;
+        const i = +t.dataset.i;
+        if (e.key === 'Backspace') {
+          e.preventDefault();
+          if (F.doors[i].t !== '?' || F.doors[i].a || F.doors[i].b === 'safe') {
+            F.doors[i].a = false;
+            F.doors[i].b = '?';
+            setDoor(i, '?');
+            focusBox(i);
+          } else if (i > 0) {
+            setDoor(i - 1, '?');
+            focusBox(i - 1);
+          }
+          return;
+        }
+        if (e.key === 'ArrowLeft') {
+          e.preventDefault();
+          focusBox(Math.max(0, i - 1));
+        } else if (e.key === 'ArrowRight') {
+          e.preventDefault();
+          focusBox(Math.min(F.n - 1, i + 1));
+        } else if (/^[1-4]$/.test(e.key)) {
+          e.preventDefault();
+          if (+e.key <= F.n) focusBox(+e.key - 1);
+        }
+      });
+      document.addEventListener('paste', (e) => {
+        const t = e.target;
+        if (!t.classList || !t.classList.contains('box')) return;
+        e.preventDefault();
+        const txt = (e.clipboardData || window.clipboardData).getData('text');
+        let i = +t.dataset.i;
+        for (const c of txt) {
+          const ty = ch2t(c);
+          if (ty === null) continue;
+          if (i >= F.n) break;
+          F.doors[i].t = ty;
+          i++;
+        }
+        refreshDoors();
+        renderAdvice();
+        focusBox(Math.min(i, F.n - 1));
+      });
+      // type a round number directly: commits on Enter or when you leave the field
+      function commitRound(t) {
+        const n = parseInt(t.value, 10);
+        if (!n || n < 1 || n > 50 || n === S.round) {
+          t.value = S.round;
+          return false;
+        }
+        S.round = n;
+        newRoom();
+        persist();
+        return true;
+      }
+      document.addEventListener('focusin', (e) => {
+        const t = e.target;
+        if (t.id === 'rin')
+          setTimeout(() => {
+            try {
+              t.select();
+            } catch (x) {}
+          }, 0);
+      });
+      document.addEventListener('input', (e) => {
+        const t = e.target;
+        if (t.id === 'rin') t.value = t.value.replace(/\D/g, '');
+      });
+      document.addEventListener('change', (e) => {
+        const t = e.target;
+        if (t.id === 'rin' && commitRound(t)) render(false);
+      });
+      document.addEventListener('keydown', (e) => {
+        const t = e.target;
+        if (t.id !== 'rin' || e.key !== 'Enter') return;
+        e.preventDefault();
+        t.blur();
+        if (!isWR(S.round) && !isEnd(S.round)) focusBox(0);
+      });
+      newRoom();
+      render();
+    </script>
+  </body>
+</html>
